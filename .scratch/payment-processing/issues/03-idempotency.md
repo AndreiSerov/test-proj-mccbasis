@@ -4,10 +4,14 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Same key and same body returns the same `payment_id` and `created_at`; still exactly one Payment and one Outbox event
-- [ ] Same key and a different body returns 409
-- [ ] Concurrent creates with the same key and body yield one Payment, one Outbox event, and identical responses
-- [ ] Unit tests: the Request hash is equal across metadata key order and `10.0`/`10.00`, and differs for different bodies
-- [ ] `scripts/check` passes
+- [x] Same key and same body returns the same `payment_id` and `created_at`; still exactly one Payment and one Outbox event
+- [x] Same key and a different body returns 409
+- [x] Concurrent creates with the same key and body yield one Payment, one Outbox event, and identical responses
+- [x] Unit tests: the Request hash is equal across metadata key order and `10.0`/`10.00`, and differs for different bodies
+- [x] `scripts/check` passes
+
+## Comments
+
+- 2026-11-10: Done. Reviewed (no blockers; 6 fixes). Insert-race path has deterministic tests (blocked INSERT via pg_stat_activity). Replay returns the current stored status. scripts/check: 61 passed under Podman.

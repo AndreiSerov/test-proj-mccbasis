@@ -1,5 +1,7 @@
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -10,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from conftest import API_KEY
 from payments.api.app import create_app
 from payments.core.settings import Settings
+from payments.domain.create_payment import CreatePayment
+from payments.domain.request_hash import request_hash
 
 AUTH = {"X-API-Key": API_KEY}
 
@@ -277,3 +281,245 @@ async def test_amount_with_a_third_significant_decimal_is_rejected(
     )
 
     assert response.status_code == 422
+
+
+async def _counts(db: AsyncEngine, key: str) -> tuple[int, int]:
+    async with db.connect() as conn:
+        payments = (
+            await conn.execute(
+                text("SELECT count(*) FROM payments WHERE idempotency_key = :k"),
+                {"k": key},
+            )
+        ).scalar_one()
+        events = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM outbox WHERE aggregate_id IN "
+                    "(SELECT id FROM payments WHERE idempotency_key = :k)"
+                ),
+                {"k": key},
+            )
+        ).scalar_one()
+    return payments, events
+
+
+async def test_same_key_and_body_replays_the_original_payment(
+    client: httpx.AsyncClient, db: AsyncEngine
+) -> None:
+    key = str(uuid.uuid4())
+    first = await client.post(
+        "/api/v1/payments", json=valid_body(), headers=headers(key)
+    )
+    second = await client.post(
+        "/api/v1/payments", json=valid_body(), headers=headers(key)
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json() == first.json()
+    assert await _counts(db, key) == (1, 1)
+
+
+async def test_replay_returns_the_stored_status_not_pending(
+    client: httpx.AsyncClient, db: AsyncEngine
+) -> None:
+    key = str(uuid.uuid4())
+    first = await client.post(
+        "/api/v1/payments", json=valid_body(), headers=headers(key)
+    )
+    async with db.begin() as conn:
+        await conn.execute(
+            text("UPDATE payments SET status = 'succeeded' WHERE idempotency_key = :k"),
+            {"k": key},
+        )
+
+    replay = await client.post(
+        "/api/v1/payments", json=valid_body(), headers=headers(key)
+    )
+
+    assert replay.status_code == 202
+    assert replay.json()["payment_id"] == first.json()["payment_id"]
+    assert replay.json()["created_at"] == first.json()["created_at"]
+    assert replay.json()["status"] == "succeeded"
+
+
+async def test_replay_ignores_metadata_key_order_and_amount_formatting(
+    client: httpx.AsyncClient, db: AsyncEngine
+) -> None:
+    key = str(uuid.uuid4())
+    first = await client.post(
+        "/api/v1/payments",
+        json=valid_body(amount="10.5", metadata={"a": 1, "b": 2}),
+        headers=headers(key),
+    )
+    second = await client.post(
+        "/api/v1/payments",
+        json=valid_body(amount="10.50", metadata={"b": 2, "a": 1}),
+        headers=headers(key),
+    )
+
+    assert second.status_code == 202
+    assert second.json() == first.json()
+    assert await _counts(db, key) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"amount": "10.51"},
+        {"currency": "EUR"},
+        {"description": "Order 43"},
+        {"metadata": {"order_id": 43}},
+        {"webhook_url": "https://client.example/hooks/other"},
+    ],
+)
+async def test_same_key_with_a_different_body_returns_409(
+    client: httpx.AsyncClient, db: AsyncEngine, overrides: dict[str, Any]
+) -> None:
+    key = str(uuid.uuid4())
+    await client.post("/api/v1/payments", json=valid_body(), headers=headers(key))
+
+    conflict = await client.post(
+        "/api/v1/payments", json=valid_body(**overrides), headers=headers(key)
+    )
+
+    assert conflict.status_code == 409
+    assert "Idempotency-Key" in conflict.json()["detail"]
+    assert await _counts(db, key) == (1, 1)
+
+
+@asynccontextmanager
+async def separate_clients(
+    settings: Settings, n: int
+) -> AsyncIterator[list[httpx.AsyncClient]]:
+    """n clients, each with its own app and connection pool."""
+    apps = [create_app(settings) for _ in range(n)]
+    clients = [
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=a), base_url="http://test")
+        for a in apps
+    ]
+    try:
+        yield clients
+    finally:
+        for c in clients:
+            await c.aclose()
+        for a in apps:
+            await a.state.engine.dispose()
+
+
+async def test_concurrent_creates_with_the_same_key_make_one_payment(
+    migrated_settings: Settings, db: AsyncEngine
+) -> None:
+    key = str(uuid.uuid4())
+    async with separate_clients(migrated_settings, 10) as clients:
+        responses = await asyncio.gather(
+            *(
+                c.post("/api/v1/payments", json=valid_body(), headers=headers(key))
+                for c in clients
+            )
+        )
+
+    assert [r.status_code for r in responses] == [202] * 10
+    assert len({r.text for r in responses}) == 1
+    assert await _counts(db, key) == (1, 1)
+
+
+async def test_concurrent_creates_with_the_same_key_and_different_bodies(
+    migrated_settings: Settings, db: AsyncEngine
+) -> None:
+    key = str(uuid.uuid4())
+    async with separate_clients(migrated_settings, 6) as clients:
+        responses = await asyncio.gather(
+            *(
+                c.post(
+                    "/api/v1/payments",
+                    json=valid_body(description=f"Order {i % 2}"),
+                    headers=headers(key),
+                )
+                for i, c in enumerate(clients)
+            )
+        )
+
+    assert sorted({r.status_code for r in responses}) == [202, 409]
+    assert await _counts(db, key) == (1, 1)
+
+
+async def _post_while_rival_insert_is_pending(
+    settings: Settings,
+    db: AsyncEngine,
+    rival_body: dict[str, Any],
+    post_body: dict[str, Any],
+) -> tuple[httpx.Response, uuid.UUID]:
+    """Force the race: a rival holds an uncommitted insert of the key while the POST
+    misses its lookup and blocks on the unique index; then the rival commits."""
+    key = str(uuid.uuid4())
+    payment_id = uuid.uuid4()
+    rival_hash = request_hash(CreatePayment.model_validate(rival_body))
+    async with (
+        separate_clients(settings, 1) as (client,),
+        db.connect() as rival,
+        db.connect() as monitor,
+    ):
+        # Autocommit, so every poll sees a fresh pg_stat_activity snapshot.
+        await monitor.execution_options(isolation_level="AUTOCOMMIT")
+        await rival.begin()
+        await rival.execute(
+            text(
+                "INSERT INTO payments (id, amount, currency, description, metadata, "
+                "status, idempotency_key, request_hash, webhook_url, created_at) "
+                "VALUES (:id, 10.50, 'USD', 'Order 42', '{}', 'pending', :k, :h, "
+                "'https://client.example/hooks/payments', now())"
+            ),
+            {"id": payment_id, "k": key, "h": rival_hash},
+        )
+        await rival.execute(
+            text(
+                "INSERT INTO outbox (aggregate_id, event_type, payload, created_at) "
+                "VALUES (:id, 'payments.new', '{}', now())"
+            ),
+            {"id": payment_id},
+        )
+        post = asyncio.create_task(
+            client.post("/api/v1/payments", json=post_body, headers=headers(key))
+        )
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    blocked = (
+                        await monitor.execute(
+                            text(
+                                "SELECT count(*) FROM pg_stat_activity "
+                                "WHERE wait_event_type = 'Lock' "
+                                "AND pid <> pg_backend_pid()"
+                            )
+                        )
+                    ).scalar_one()
+                    if blocked:
+                        break
+                    await asyncio.sleep(0.05)
+            await rival.commit()
+        except BaseException:
+            post.cancel()
+            raise
+        return await post, payment_id
+
+
+async def test_losing_the_insert_race_replays_the_winner(
+    migrated_settings: Settings, db: AsyncEngine
+) -> None:
+    response, payment_id = await _post_while_rival_insert_is_pending(
+        migrated_settings, db, valid_body(), valid_body()
+    )
+
+    assert response.status_code == 202
+    assert response.json()["payment_id"] == str(payment_id)
+
+
+async def test_losing_the_insert_race_with_a_different_body_returns_409(
+    migrated_settings: Settings, db: AsyncEngine
+) -> None:
+    response, _ = await _post_while_rival_insert_is_pending(
+        migrated_settings, db, valid_body(description="Other"), valid_body()
+    )
+
+    assert response.status_code == 409

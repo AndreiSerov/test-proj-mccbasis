@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
+from payments.db.models import Payment
 from payments.domain.payment import Currency, PaymentStatus
 
 
@@ -12,6 +13,14 @@ class PaymentAccepted(BaseModel):
     payment_id: uuid.UUID
     status: PaymentStatus
     created_at: datetime
+
+    @classmethod
+    def from_payment(cls, payment: "Payment") -> "PaymentAccepted":
+        return cls(
+            payment_id=payment.id,
+            status=payment.status,
+            created_at=payment.created_at,
+        )
 
 
 class PaymentOut(BaseModel):

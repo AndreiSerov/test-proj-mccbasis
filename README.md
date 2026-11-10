@@ -29,7 +29,7 @@ curl -X POST localhost:8000/api/v1/payments \
 curl localhost:8000/api/v1/payments/<payment_id> -H 'X-API-Key: dev-api-key'
 ```
 
-A repeated `Idempotency-Key` is currently rejected with an error; ticket 03 adds the replay of the original Payment and the 409 for a different body.
+`Idempotency-Key` makes creates safe to retry. A repeated key with the same body (same Request hash: key order in `metadata` and `10.5` vs `10.50` do not matter) returns 202 with the original Payment's `payment_id`, `created_at` and its current `status`, and creates nothing new. The same key with a different body returns 409. Concurrent creates with one key yield exactly one Payment.
 
 ## Check
 

@@ -19,6 +19,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from payments.domain.payment import Currency, PaymentStatus
 
+IDEMPOTENCY_KEY_CONSTRAINT = "uq_payments_idempotency_key"
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -40,7 +42,7 @@ class Base(DeclarativeBase):
 class Payment(Base):
     __tablename__ = "payments"
     __table_args__ = (
-        UniqueConstraint("idempotency_key", name="uq_payments_idempotency_key"),
+        UniqueConstraint("idempotency_key", name=IDEMPOTENCY_KEY_CONSTRAINT),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
