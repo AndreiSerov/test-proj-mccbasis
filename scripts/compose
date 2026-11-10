@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run compose with the chosen container engine: Podman by default, Docker if asked.
+#   scripts/compose up --build            # podman compose (docker compose if podman is missing)
+#   CONTAINER_ENGINE=docker scripts/compose up --build
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+engine="${CONTAINER_ENGINE:-}"
+if [[ -z "$engine" ]]; then
+  if command -v podman >/dev/null; then engine=podman; else engine=docker; fi
+fi
+
+case "$engine" in
+  podman | docker) exec "$engine" compose "$@" ;;
+  *) echo "CONTAINER_ENGINE must be podman or docker, got: $engine" >&2; exit 2 ;;
+esac
