@@ -33,7 +33,13 @@ curl localhost:8000/api/v1/payments/<payment_id> -H 'X-API-Key: dev-api-key'
 
 ## What happens after create
 
-The API writes the Payment and an Outbox event in one transaction. The consumer's Relay (an asyncio task, ADR-0001) publishes unpublished events to the `payments` exchange and sets `published_at`. The `payments.new` handler locks the Payment, runs the Emulator (2-5 s, 90% success; configurable) if it is still `pending`, commits `succeeded` or `failed` with `processed_at`, then POSTs the Webhook `{payment_id, status, amount, currency, processed_at, metadata}` to `webhook_url` (2xx = delivered). Delivery is at least once, so make your receiver idempotent on `payment_id`. Retries and the DLQ are not built yet.
+The API writes the Payment and an Outbox event in one transaction. The consumer's Relay (an asyncio task, ADR-0001) publishes unpublished events to the `payments` exchange and sets `published_at`. The `payments.new` handler locks the Payment, runs the Emulator (2-5 s, 90% success; configurable) if it is still `pending`, commits `succeeded` or `failed` with `processed_at`, then POSTs the Webhook `{payment_id, status, amount, currency, processed_at, metadata}` to `webhook_url` (2xx = delivered). Delivery is at least once, so make your receiver idempotent on `payment_id`.
+
+## Retries and the DLQ
+
+A Delivery failure (Webhook non-2xx or timeout, DB error) is retried through RabbitMQ (ADR-0002): the consumer republishes the message to the Retry queue `payments.new.retry.1s`, then `.2s`, then `.4s` (named from `RETRY_DELAYS`, default `1,2,4`; each queue's TTL dead-letters it back to `payments.new`) and acks the original only after the broker confirms the republish. The attempt number travels in the `x-attempt` header (absent = first attempt). After the third retry fails (4 Webhook calls in total) the message goes to `payments.new.dlq` via `payments.dlx`, with `x-last-error` and `x-attempt` headers. A malformed message or an unknown `payment_id` goes straight to the DLQ. A Decline is a normal outcome and is never retried. A retry of an already-settled Payment skips the Emulator and only re-sends the Webhook. Changing `RETRY_DELAYS` creates new Retry queues and leaves the old ones on the broker; their messages still dead-letter back, so nothing is lost, and they can be deleted once empty. All of this topology is durable and declared by the consumer on start.
+
+To inspect the DLQ: `curl -u guest:guest localhost:15672/api/queues/%2F/payments.new.dlq`, or the management UI. Re-driving a parked message is manual (publish its body again to the `payments` exchange with routing key `payments.new`).
 
 ## Check
 

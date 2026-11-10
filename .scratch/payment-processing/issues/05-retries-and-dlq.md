@@ -4,12 +4,16 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Receiver fails twice then succeeds: the Webhook is delivered on the 3rd call, the Emulator ran once, and the status never changed
-- [ ] Receiver always fails: 4 Webhook calls in total, then the message is in `payments.new.dlq` with an error header
-- [ ] A Webhook timeout counts as a Delivery failure
-- [ ] A message for an unknown `payment_id` lands in the DLQ
-- [ ] A Decline produces one Webhook and nothing in the DLQ
-- [ ] All queues and exchanges are durable and declared automatically on a fresh broker
-- [ ] System tests use short `RETRY_DELAYS`; `scripts/check` passes
+- [x] Receiver fails twice then succeeds: the Webhook is delivered on the 3rd call, the Emulator ran once, and the status never changed
+- [x] Receiver always fails: 4 Webhook calls in total, then the message is in `payments.new.dlq` with an error header
+- [x] A Webhook timeout counts as a Delivery failure
+- [x] A message for an unknown `payment_id` lands in the DLQ
+- [x] A Decline produces one Webhook and nothing in the DLQ
+- [x] All queues and exchanges are durable and declared automatically on a fresh broker
+- [x] System tests use short `RETRY_DELAYS`; `scripts/check` passes
+
+## Comments
+
+- 2026-11-10: Done. Reviewed (no blockers; 6 fixes incl. a pause before requeue when a republish is refused). Compose smoke test: unreachable webhook -> DLQ with x-attempt 4 after ~14 s. A DB error being retried is not tested (shares the Webhook failure path). scripts/check: 85 passed under Podman.

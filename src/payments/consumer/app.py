@@ -1,20 +1,26 @@
-import json
 import logging
 import uuid
 
 import httpx
 from faststream import FastStream
 from faststream.rabbit import RabbitBroker, RabbitMessage
-from pamqp.commands import Basic
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     async_sessionmaker,
     create_async_engine,
 )
 
+from payments.consumer.confirms import require_ack
+from payments.consumer.errors import Unprocessable
 from payments.consumer.handler import PaymentHandler
 from payments.consumer.relay import Relay
-from payments.consumer.topology import PAYMENTS_EXCHANGE, PAYMENTS_NEW_QUEUE
+from payments.consumer.retry import FailureRouter
+from payments.consumer.topology import (
+    PAYMENTS_EXCHANGE,
+    PAYMENTS_NEW_QUEUE,
+    declare_retry_topology,
+)
 from payments.core.settings import Settings, load_settings
 from payments.db.models import OutboxEvent
 from payments.domain.emulator import Emulator
@@ -22,8 +28,10 @@ from payments.domain.emulator import Emulator
 logger = logging.getLogger(__name__)
 
 
-class PublishNotConfirmed(Exception):
-    """The broker did not positively confirm a publish (nack or unroutable return)."""
+class PaymentNewMessage(BaseModel):
+    """The `payments.new` body: at least a `payment_id`."""
+
+    payment_id: uuid.UUID
 
 
 class _Resources:
@@ -53,10 +61,7 @@ class _Resources:
                 routing_key=event.event_type,
                 persist=True,
             )
-            if not isinstance(confirmation, Basic.Ack):
-                raise PublishNotConfirmed(
-                    f"outbox event {event.id}: broker answered {confirmation!r}"
-                )
+            require_ack(confirmation, f"outbox event {event.id}")
 
         self.relay = Relay(
             session_factory=session_factory,
@@ -70,36 +75,31 @@ class _Resources:
         await self.engine.dispose()
 
 
-async def on_delivery_failure(message: RabbitMessage, error: Exception) -> None:
-    """The one place a failed message ends up; it gets the whole message.
-
-    Ticket 05 replaces this with retry routing (attempt header) and the DLQ.
-    """
-    logger.error(
-        "delivery failure; dropping message body=%r headers=%r",
-        message.body,
-        message.headers,
-        exc_info=error,
-    )
-
-
 def create_app(settings: Settings) -> FastStream:
     broker = RabbitBroker(settings.rabbitmq_url)
     state: dict[str, _Resources] = {}
+    failures = FailureRouter(broker.publish, settings.retry_delays)
 
     @broker.subscriber(PAYMENTS_NEW_QUEUE, PAYMENTS_EXCHANGE)
     async def handle_payment_new(message: RabbitMessage) -> None:
         # Parsing is inside the guard too: a malformed body is a failed message.
         try:
-            payment_id = uuid.UUID(json.loads(message.body)["payment_id"])
+            try:
+                payment_id = PaymentNewMessage.model_validate_json(
+                    message.body
+                ).payment_id
+            except ValidationError as error:
+                raise Unprocessable(f"malformed message: {error}") from error
             await state["resources"].handler.handle(payment_id)
         except Exception as error:
-            await on_delivery_failure(message, error)
+            await failures.on_failed_message(message, error)
 
     app = FastStream(broker)
 
     @app.on_startup
     async def open_resources() -> None:
+        await broker.connect()
+        await declare_retry_topology(broker, settings.retry_delays)
         state["resources"] = _Resources(settings, broker)
 
     @app.after_startup

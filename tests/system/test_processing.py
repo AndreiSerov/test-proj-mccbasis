@@ -1,6 +1,7 @@
 """Seam 1: create over the API, the consumer (Relay + handler) runs in this loop."""
 
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -74,6 +75,46 @@ async def clean_slate(migrated_settings: Settings, db: AsyncEngine) -> None:
         channel = await connection.channel()
         queue = await channel.declare_queue("payments.new", durable=True)
         await queue.purge()
+    for name in [DLQ, *RETRY_QUEUES]:
+        await _purge_if_exists(migrated_settings, name)
+
+
+DLQ = "payments.new.dlq"
+SHORT_DELAYS = (0.1, 0.2, 0.4)
+RETRY_QUEUES = [f"payments.new.retry.{d}s" for d in SHORT_DELAYS]
+
+
+async def _purge_if_exists(settings: Settings, name: str) -> None:
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    async with connection:
+        channel = await connection.channel()
+        try:
+            queue = await channel.declare_queue(name, passive=True)
+        except aio_pika.exceptions.ChannelClosed:  # 404: not declared yet
+            return
+        await queue.purge()
+
+
+async def dlq_messages(
+    settings: Settings, payment_id: str | None = None, timeout: float = 10.0
+) -> list[aio_pika.abc.AbstractIncomingMessage]:
+    """Wait until the DLQ holds a message (for `payment_id`, if given); read them."""
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    async with connection:
+        channel = await connection.channel()
+        queue = await channel.declare_queue(DLQ, passive=True)
+        found: list[aio_pika.abc.AbstractIncomingMessage] = []
+
+        async def arrived() -> bool | None:
+            while (message := await queue.get(fail=False)) is not None:
+                found.append(message)  # unacked; returned to the queue on close
+            matching = [
+                m for m in found if payment_id is None or payment_id.encode() in m.body
+            ]
+            return True if matching else None
+
+        await eventually(arrived, timeout=timeout)
+        return found
 
 
 @pytest.fixture
@@ -91,6 +132,7 @@ async def start_consumer(
                 "emulator_success_rate": 1.0,
                 "relay_poll_interval": 0.05,
                 "webhook_timeout": 2,
+                "retry_delays": SHORT_DELAYS,
                 **overrides,
             }
         )
@@ -161,7 +203,16 @@ async def webhooks_for(receiver: WebhookReceiver, payment_id: str, count: int):
     return await eventually(arrived)
 
 
+async def assert_dlq_empty(settings: Settings) -> None:
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    async with connection:
+        channel = await connection.channel()
+        queue = await channel.declare_queue(DLQ, passive=True)
+        assert queue.declaration_result.message_count == 0
+
+
 async def test_declined_payment_is_failed_and_webhooked_once(
+    migrated_settings: Settings,
     api: httpx.AsyncClient,
     receiver: WebhookReceiver,
     start_consumer: Callable[..., Awaitable[None]],
@@ -173,6 +224,7 @@ async def test_declined_payment_is_failed_and_webhooked_once(
     calls = await webhooks_for(receiver, payment_id, 1)
     await asyncio.sleep(0.3)  # a wrongly retried Decline would show up as a 2nd call
     assert [c["status"] for c in receiver.for_payment(payment_id)] == ["failed"]
+    await assert_dlq_empty(migrated_settings)
     assert calls[0]["processed_at"] is not None
     assert (await get_payment(api, payment_id))["status"] == "failed"
 
@@ -319,3 +371,191 @@ async def test_bad_messages_do_not_stop_the_consumer(
 
     await webhooks_for(receiver, payment_id, 1)
     assert (await get_payment(api, payment_id))["status"] == "succeeded"
+
+
+async def test_webhook_failing_twice_is_retried_and_delivered_on_the_third_call(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    receiver.script = [(500, 0), (503, 0)]
+    await start_consumer()
+
+    payment_id = await create_payment(api, receiver.url)
+
+    calls = await webhooks_for(receiver, payment_id, 3)
+    await asyncio.sleep(0.5)  # longer than all retry delays: no 4th call follows
+    assert len(receiver.for_payment(payment_id)) == 3
+    assert {c["status"] for c in calls} == {"succeeded"}
+    assert len({c["processed_at"] for c in calls}) == 1  # the Emulator ran once
+    payment = await get_payment(api, payment_id)
+    assert payment["status"] == "succeeded"
+    assert payment["processed_at"] == calls[0]["processed_at"]
+    await assert_dlq_empty(migrated_settings)
+
+
+async def test_webhook_always_failing_ends_in_the_dlq_after_four_calls(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    receiver.status = 500
+    await start_consumer()
+
+    payment_id = await create_payment(api, receiver.url)
+
+    (message,) = await dlq_messages(migrated_settings, payment_id)
+    assert json.loads(message.body)["payment_id"] == payment_id
+    assert "500" in str(message.headers["x-last-error"])
+    assert message.headers["x-attempt"] == 4
+    await asyncio.sleep(0.5)
+    assert len(receiver.for_payment(payment_id)) == 4
+    payment = await get_payment(api, payment_id)
+    assert payment["status"] == "succeeded"  # settled once; only the Webhook failed
+    assert {c["processed_at"] for c in receiver.for_payment(payment_id)} == {
+        payment["processed_at"]
+    }
+
+
+async def test_webhook_timeout_is_a_delivery_failure_and_is_retried(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    receiver.script = [(200, 1.0)]  # slower than the timeout, then healthy
+    await start_consumer(webhook_timeout=0.3)
+
+    payment_id = await create_payment(api, receiver.url)
+
+    await webhooks_for(receiver, payment_id, 2)
+    await asyncio.sleep(0.3)
+    assert len(receiver.for_payment(payment_id)) == 2
+    await assert_dlq_empty(migrated_settings)
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    [
+        b"not json",
+        b'{"payment_id": "nope"}',
+        b'{"payment_id": "%s"}' % str(uuid.uuid4()).encode(),
+        b'{"payment_id": 5}',
+        b"[]",
+    ],
+    ids=["malformed", "bad-uuid", "unknown-payment", "int-id", "not-an-object"],
+)
+async def test_unprocessable_message_goes_straight_to_the_dlq(
+    receiver: WebhookReceiver,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+    garbage: bytes,
+) -> None:
+    await start_consumer(
+        retry_delays=(30,)
+    )  # a retry would take far longer than the wait
+
+    await _publish_raw(migrated_settings, garbage)
+
+    (message,) = await dlq_messages(migrated_settings, timeout=5)
+    assert message.body == garbage
+    assert message.headers["x-last-error"]
+
+
+async def _publish_raw(settings: Settings, body: bytes) -> None:
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    async with connection:
+        channel = await connection.channel()
+        exchange = await channel.get_exchange("payments")
+        await exchange.publish(aio_pika.Message(body), routing_key="payments.new")
+
+
+async def test_retry_and_dead_letter_topology_is_declared_durable_on_a_fresh_broker(
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    connection = await aio_pika.connect_robust(migrated_settings.rabbitmq_url)
+    async with connection:
+        channel = await connection.channel()
+        for name in [DLQ, *RETRY_QUEUES]:
+            await channel.queue_delete(name)  # no error if it does not exist
+        await channel.exchange_delete("payments.dlx")
+
+        await start_consumer()
+
+        # Re-declaring with the expected durability and arguments only succeeds
+        # if the broker already holds an identical queue or exchange.
+        await channel.declare_exchange(
+            "payments.dlx", aio_pika.ExchangeType.DIRECT, durable=True
+        )
+        for name, delay_ms in zip(RETRY_QUEUES, (100, 200, 400), strict=True):
+            await channel.declare_queue(
+                name,
+                durable=True,
+                arguments={
+                    "x-message-ttl": delay_ms,
+                    "x-dead-letter-exchange": "payments",
+                    "x-dead-letter-routing-key": "payments.new",
+                },
+            )
+        await channel.declare_queue(DLQ, durable=True)
+        # payments.dlx routes to the DLQ.
+        dlx = await channel.get_exchange("payments.dlx")
+        await dlx.publish(aio_pika.Message(b"probe"), routing_key=DLQ)
+
+    (message,) = await dlq_messages(migrated_settings, timeout=5)
+    assert message.body == b"probe"
+
+
+async def test_garbage_attempt_header_is_treated_as_the_first_attempt(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    db: AsyncEngine,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    receiver.status = 500
+    payment_id = await create_payment(api, receiver.url)
+    await _mark_all_published(db)  # only the hand-published message below counts
+    await start_consumer()
+
+    connection = await aio_pika.connect_robust(migrated_settings.rabbitmq_url)
+    async with connection:
+        channel = await connection.channel()
+        exchange = await channel.get_exchange("payments")
+        await exchange.publish(
+            aio_pika.Message(
+                json.dumps({"payment_id": payment_id}).encode(),
+                headers={"x-attempt": "abc"},
+            ),
+            routing_key="payments.new",
+        )
+
+    (message,) = await dlq_messages(migrated_settings, payment_id)
+    assert message.headers["x-attempt"] == 4
+    await asyncio.sleep(0.3)
+    assert len(receiver.for_payment(payment_id)) == 4
+
+
+async def test_refused_republish_is_paused_not_spun_in_a_hot_loop(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    receiver.status = 500
+    await start_consumer(retry_delays=(1,))
+    connection = await aio_pika.connect_robust(migrated_settings.rabbitmq_url)
+    async with connection:
+        channel = await connection.channel()
+        # With the Retry queue gone the republish is returned as unroutable.
+        await channel.queue_delete("payments.new.retry.1s")
+
+        payment_id = await create_payment(api, receiver.url)
+        await webhooks_for(receiver, payment_id, 1)
+        await asyncio.sleep(2.5)
+
+    # One call per ~1 s pause (about 3 in all); a hot loop would make hundreds.
+    assert len(receiver.for_payment(payment_id)) <= 5

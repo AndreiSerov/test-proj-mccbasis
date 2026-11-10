@@ -8,12 +8,15 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator
+import warnings
+from collections.abc import Callable, Iterator
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.rabbitmq import RabbitMqContainer
+from testcontainers.core.container import DockerContainer
 
 from payments.core.settings import Settings
 
@@ -77,20 +80,68 @@ def docker_required() -> None:
         )
 
 
+def _container_url[C: DockerContainer](
+    make: Callable[[], C], url: Callable[[C], str]
+) -> Iterator[str]:
+    """Start a container and yield its URL, retrying once if it exits early.
+
+    Under Podman a container occasionally exits right after starting, which
+    surfaces as "container did not become running" when its port is read.
+    The failed container's logs are attached so the cause is visible.
+    """
+    for attempt in (1, 2):
+        container = make()
+        try:
+            container.start()
+            address = url(container)
+        except TimeoutError:
+            logs = _logs(container)
+            with suppress(Exception):  # it may never have been created
+                container.stop()
+            if attempt == 2:
+                raise
+            warnings.warn(
+                f"{container.image} exited at start, retrying. Logs:\n{logs}",
+                stacklevel=2,
+            )
+            continue
+        try:
+            yield address
+        finally:
+            container.stop()
+        return
+
+
+def _logs(container: DockerContainer) -> str:
+    try:
+        out, err = container.get_logs()
+    except Exception as error:  # the container may already be gone
+        return f"<no logs: {error!r}>"
+    return (out + err).decode(errors="replace")[-4000:]
+
+
+def _amqp_url(mq: RabbitMqContainer) -> str:
+    host = mq.get_container_host_ip()
+    port = mq.get_exposed_port(mq.port)
+    return f"amqp://{mq.username}:{mq.password}@{host}:{port}/"
+
+
 @pytest.fixture(scope="session")
 def postgres_url(docker_required: None) -> Iterator[str]:
-    with PostgresContainer(
-        "docker.io/library/postgres:16-alpine", driver="asyncpg"
-    ) as pg:
-        yield pg.get_connection_url()
+    yield from _container_url(
+        lambda: PostgresContainer(
+            "docker.io/library/postgres:16-alpine", driver="asyncpg"
+        ),
+        lambda pg: pg.get_connection_url(),
+    )
 
 
 @pytest.fixture(scope="session")
 def rabbitmq_url(docker_required: None) -> Iterator[str]:
-    with RabbitMqContainer("docker.io/library/rabbitmq:3-management-alpine") as mq:
-        host = mq.get_container_host_ip()
-        port = mq.get_exposed_port(mq.port)
-        yield f"amqp://{mq.username}:{mq.password}@{host}:{port}/"
+    yield from _container_url(
+        lambda: RabbitMqContainer("docker.io/library/rabbitmq:3-management-alpine"),
+        _amqp_url,
+    )
 
 
 API_KEY = "test-key"

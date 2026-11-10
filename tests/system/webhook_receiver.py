@@ -17,6 +17,8 @@ class WebhookReceiver:
         self.requests: list[dict[str, Any]] = []
         self.status = 200
         self.delay = 0.0
+        self.script: list[tuple[int, float]] = []
+        """(status, delay) answers for the next calls, used before `status`/`delay`."""
         self.drip_seconds = 0.0
         self.abandoned: list[str] = []
         """payment_ids whose request the client hung up on mid-response."""
@@ -36,11 +38,10 @@ class WebhookReceiver:
                 break
         payload = json.loads(body)
         self.requests.append(payload)
-        if self.delay:
-            await asyncio.sleep(self.delay)
-        await send(
-            {"type": "http.response.start", "status": self.status, "headers": []}
-        )
+        status, delay = self.script.pop(0) if self.script else (self.status, self.delay)
+        if delay:
+            await asyncio.sleep(delay)
+        await send({"type": "http.response.start", "status": status, "headers": []})
         # Optionally drip the body so no single read times out but the total is long.
         disconnect = asyncio.create_task(receive())
         for _ in range(int(self.drip_seconds / 0.1)):

@@ -38,8 +38,11 @@ A technical error while handling a message (webhook non-2xx or timeout, DB error
 One of the TTL queues `payments.new.retry.{1s,2s,4s}` that hold a message for its delay, then dead-letter it back to `payments.new`.
 _Avoid_: Delay queue, backoff queue
 
+**Unprocessable message**:
+A message that can never be processed (malformed body, unknown Payment); it goes straight to the DLQ without retries.
+
 **DLQ**:
-The `payments.new.dlq` queue that holds messages still failing after 3 retries, with the last error in a header.
+The `payments.new.dlq` queue that holds messages still failing after 3 retries, and messages that can never be processed (malformed body, unknown Payment), with the last error in a header.
 _Avoid_: Dead queue, error queue
 
 **Webhook**:
