@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Check that this repo's harness is complete and that its documents point at real things."""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SKILLS = ROOT / ".claude" / "skills"
+REQUIRED_IGNORES = [".claude/skills/", ".claude/settings.local.json", ".claude/worktrees/"]
+REQUIRED_FILES = ["AGENTS.md", "docs/agents/workflow.md", "docs/agents/agreements.md"]
+
+
+def ignored(path: str) -> bool:
+    done = subprocess.run(
+        ["git", "-C", str(ROOT), "check-ignore", "-q", "--no-index", path], check=False
+    )
+    return done.returncode == 0
+
+
+def check_skills() -> list[str]:
+    problems = []
+    sources = tomllib.loads((ROOT / ".claude/skills.toml").read_text(encoding="utf-8"))["source"]
+    state_path = SKILLS / ".managed.json"
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    for source in sources:
+        if state.get("commits", {}).get(source["name"]) != source["commit"]:
+            problems.append(
+                f"{source['name']}: installed commit differs from the pin; run scripts/sync-skills"
+            )
+        for path in source["skills"]:
+            if not (SKILLS / Path(path).name / "SKILL.md").is_file():
+                problems.append(f"skill not installed: {Path(path).name}; run scripts/sync-skills")
+    return problems
+
+
+def check_references() -> list[str]:
+    problems = []
+    for document in ("AGENTS.md", "docs/agents/workflow.md"):
+        path = ROOT / document
+        if path.is_file():
+            for name in sorted(set(re.findall(r"`/([a-z][a-z-]+)`", path.read_text("utf-8")))):
+                if not (SKILLS / name).is_dir():
+                    problems.append(f"{document} names /{name}, which is not installed")
+    return problems
+
+
+def check_settings() -> list[str]:
+    try:
+        settings = json.loads((ROOT / ".claude/settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return [f".claude/settings.json is unreadable: {error}"]
+    problems = []
+    for rule in settings.get("permissions", {}).get("deny", []):
+        match = re.fullmatch(r"Read\(\./(.+?)(/\*\*)?\)", rule)
+        if match and "*" not in match[1] and not ignored(match[1] + ("/" if match[2] else "")):
+            problems.append(f"denied to agents but not gitignored: {match[1]}")
+    return problems
+
+
+def main() -> int:
+    problems = [f"missing file: {f}" for f in REQUIRED_FILES if not (ROOT / f).is_file()]
+    check = ROOT / "scripts/check"
+    if not os.access(check, os.X_OK):
+        problems.append("scripts/check is missing or not executable")
+    problems += [f"not gitignored: {p}" for p in REQUIRED_IGNORES if not ignored(p)]
+    problems += check_skills() + check_references() + check_settings()
+    for problem in problems:
+        print(f"- {problem}")
+    print("Harness OK" if not problems else f"{len(problems)} problem(s) found")
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

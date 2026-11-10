@@ -1,0 +1,28 @@
+# External skills, installed into the gitignored .claude/skills/ by scripts/sync-skills.
+# `scripts/sync-skills --update` pulls the newest commit and moves this pin.
+
+[[source]]
+name = "mattpocock"
+repo = "https://github.com/mattpocock/skills.git"
+commit = "59db609eb1e18aaf59b63284d0e52255aff0c63c"
+skills = [
+    "skills/engineering/ask-matt",
+    "skills/engineering/code-review",
+    "skills/engineering/codebase-design",
+    "skills/engineering/diagnosing-bugs",
+    "skills/engineering/domain-modeling",
+    "skills/engineering/grill-with-docs",
+    "skills/productivity/grilling",
+    "skills/engineering/implement",
+    "skills/engineering/implement-spec",
+    "skills/engineering/pr",
+    "skills/engineering/prototype",
+    "skills/engineering/research",
+    "skills/engineering/retro",
+    "skills/engineering/tdd",
+    "skills/engineering/to-spec",
+    "skills/engineering/to-tickets",
+    "skills/engineering/triage",
+    "skills/productivity/writing-for-agents",
+    "skills/productivity/grill-me",
+]

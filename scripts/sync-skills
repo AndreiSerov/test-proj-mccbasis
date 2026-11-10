@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Install the skills in .claude/skills.toml into the gitignored .claude/skills/ folder.
+
+Each project gets its own copy at the pinned commit. --update first pulls the newest commit
+from each source, moves the pin and prints what changed, so review that output.
+"""
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+MANIFEST = ROOT / ".claude" / "skills.toml"
+SKILLS = ROOT / ".claude" / "skills"
+STATE = SKILLS / ".managed.json"
+
+
+def git(*args: str) -> str:
+    done = subprocess.run(["git", *args], check=False, capture_output=True, text=True)
+    if done.returncode:
+        sys.exit(f"git {' '.join(args)} failed:\n{done.stderr.strip()}")
+    return done.stdout.strip()
+
+
+def skill_name(path: str) -> str:
+    parts = Path(path).parts
+    if Path(path).is_absolute() or ".." in parts or not parts:
+        sys.exit(f"Skill path must stay inside its source: {path}")
+    return parts[-1]
+
+
+def move_pin(source_name: str, commit: str) -> None:
+    """Rewrite only the commit line of this source, keeping the file's comments."""
+    text = MANIFEST.read_text(encoding="utf-8")
+    pattern = rf'(name = "{re.escape(source_name)}"\s*\nrepo = "[^"]*"\s*\ncommit = ")[^"]*(")'
+    new_text, count = re.subn(pattern, rf"\g<1>{commit}\g<2>", text)
+    if count != 1:
+        sys.exit(f"Could not move the pin for {source_name}: keep name, repo, commit in order.")
+    MANIFEST.write_text(new_text, encoding="utf-8")
+
+
+def install(checkout: Path, path: str, managed: set[str]) -> str:
+    name = skill_name(path)
+    source = checkout / path
+    if not (source / "SKILL.md").is_file():
+        sys.exit(f"{path} has no SKILL.md at the pinned commit.")
+    target = SKILLS / name
+    if (target.exists() or target.is_symlink()) and name not in managed:
+        sys.exit(f"{target} exists but this script did not install it. Move it away first.")
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
+    return name
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--update", action="store_true", help="pull the newest commit first")
+    args = parser.parse_args()
+
+    sources = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))["source"]
+    SKILLS.mkdir(parents=True, exist_ok=True)
+    state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
+    managed = set(state.get("skills", []))
+    installed: list[str] = []
+    commits: dict[str, str] = {}
+
+    for source in sources:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "source"
+            git("clone", "--quiet", source["repo"], str(checkout))
+            commit = source["commit"]
+            if args.update:
+                newest = git("-C", str(checkout), "rev-parse", "HEAD")
+                if newest != commit:
+                    print(f"{source['name']}: {commit[:10]} -> {newest[:10]}")
+                    print(
+                        git(
+                            "-C",
+                            str(checkout),
+                            "diff",
+                            "--stat",
+                            commit,
+                            newest,
+                            "--",
+                            *source["skills"],
+                        )
+                        or "  no changes in the selected skills"
+                    )
+                    move_pin(source["name"], newest)
+                commit = newest
+            git("-C", str(checkout), "checkout", "--quiet", commit)
+            installed += [install(checkout, path, managed) for path in source["skills"]]
+            commits[source["name"]] = commit
+
+    if len(set(installed)) != len(installed):
+        sys.exit("Two skills share a folder name; each must be unique.")
+    for stale in sorted(managed - set(installed)):
+        shutil.rmtree(SKILLS / stale, ignore_errors=True)
+        print(f"removed {stale}")
+    STATE.write_text(
+        json.dumps({"skills": sorted(installed), "commits": commits}, indent=1) + "\n",
+        encoding="utf-8",
+    )
+    print(f"{len(installed)} skills installed in .claude/skills")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

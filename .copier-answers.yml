@@ -1,0 +1,14 @@
+# Written by Copier. Run `copier update` instead of editing this file.
+_commit: v1.0.0-3-gb4348d2
+_src_path: /Users/andreiserov/Developer/harness-template
+ci: true
+ci_runner: ubuntu-latest
+description: Async payment processing microservice (FastAPI, RabbitMQ/FastStream,
+    PostgreSQL, outbox pattern) - hh.ru test task
+issue_tracker: local-markdown
+optional_skills:
+- skills/productivity/grill-me
+private_paths: []
+project_name: test-proj-mccbasis
+stack: python-uv
+use_opencode: false

@@ -1,0 +1,25 @@
+### Agentic development ###
+# Installed by scripts/sync-skills from .claude/skills.toml
+.claude/skills/
+# Local, per-machine agent state
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+CLAUDE.local.md
+
+### Secrets ###
+.env
+.env.*
+
+### Python ###
+__pycache__/
+*.py[oc]
+build/
+dist/
+*.egg-info
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+### IDE ###
+.idea/
