@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# The project's definition of done. The commit hook and CI both run this file.
+# It belongs to the project: add every check here, cheapest first, and keep slow manual ones out.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+uv run ruff check
+uv run ruff format --check
+uv run pyright
+uv run pytest -q
