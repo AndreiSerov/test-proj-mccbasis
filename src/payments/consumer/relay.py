@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 ERROR_PAUSE = 1.0
 """Seconds to wait after a failed iteration before trying again."""
 
+STOP_TIMEOUT = 5.0
+"""Seconds `stop` waits for the current iteration before cancelling it."""
+
 Publish = Callable[[OutboxEvent], Awaitable[Any]]
 
 
@@ -33,6 +36,7 @@ class Relay:
         self._publish = publish
         self._batch_size = batch_size
         self._poll_interval = poll_interval
+        self._stopping = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -41,23 +45,34 @@ class Relay:
         self._task = asyncio.create_task(self._run(), name="relay")
 
     async def stop(self) -> None:
+        """Let the current iteration finish, then end; cancel after `STOP_TIMEOUT`."""
         if self._task is None:
             return
-        self._task.cancel()
+        self._stopping.set()
+        done, _ = await asyncio.wait({self._task}, timeout=STOP_TIMEOUT)
+        if not done:
+            logger.warning("relay did not stop in %ss; cancelling", STOP_TIMEOUT)
+            self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+        self._stopping.clear()
+
+    async def _pause(self, seconds: float) -> None:
+        """Sleep, but wake at once when stopping."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stopping.wait(), seconds)
 
     async def _run(self) -> None:
-        while True:
+        while not self._stopping.is_set():
             try:
                 published = await self.publish_batch()
             except Exception:
                 logger.exception("relay iteration failed; retrying")
-                await asyncio.sleep(ERROR_PAUSE)
+                await self._pause(ERROR_PAUSE)
                 continue
             if published == 0:
-                await asyncio.sleep(self._poll_interval)
+                await self._pause(self._poll_interval)
 
     async def publish_batch(self) -> int:
         """Claim, publish and mark one batch in a single transaction."""

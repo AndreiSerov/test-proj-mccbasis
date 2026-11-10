@@ -1,7 +1,9 @@
 """Seam 1: create over the API, the consumer (Relay + handler) runs in this loop."""
 
 import asyncio
+import io
 import json
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -18,6 +20,7 @@ from webhook_receiver import WebhookReceiver, serve_webhook_receiver
 from conftest import API_KEY
 from payments.api.app import create_app as create_api
 from payments.consumer.app import create_app as create_consumer
+from payments.core.logging import json_handler
 from payments.core.settings import Settings
 
 AUTH = {"X-API-Key": API_KEY}
@@ -124,7 +127,7 @@ async def start_consumer(
     """Start the consumer app with fast settings; stopped after the test."""
     apps: list[Any] = []
 
-    async def start(**overrides: Any) -> None:
+    async def start(**overrides: Any) -> Any:
         settings = migrated_settings.model_copy(
             update={
                 "emulator_min_delay": 0,
@@ -139,10 +142,12 @@ async def start_consumer(
         app = create_consumer(settings)
         await app.start()
         apps.append(app)
+        return app
 
     yield start
     for app in apps:
-        await app.stop()
+        if app.brokers[0].running:  # a test may have stopped it already
+            await app.stop()
 
 
 def body(webhook_url: str, **overrides: Any) -> dict[str, Any]:
@@ -559,3 +564,170 @@ async def test_refused_republish_is_paused_not_spun_in_a_hot_loop(
 
     # One call per ~1 s pause (about 3 in all); a hot loop would make hundreds.
     assert len(receiver.for_payment(payment_id)) <= 5
+
+
+async def create_payments(
+    api: httpx.AsyncClient, receiver: WebhookReceiver, count: int
+) -> list[str]:
+    return [await create_payment(api, receiver.url) for _ in range(count)]
+
+
+async def all_webhooked(receiver: WebhookReceiver, payment_ids: list[str]) -> None:
+    async def arrived() -> bool | None:
+        return True if all(receiver.for_payment(p) for p in payment_ids) else None
+
+    await eventually(arrived, timeout=20)
+
+
+async def test_ten_payments_are_processed_at_once_with_concurrency_ten(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    await start_consumer(
+        consumer_concurrency=10, emulator_min_delay=1, emulator_max_delay=1
+    )
+
+    payment_ids = await create_payments(api, receiver, 10)
+    started = time.monotonic()
+    await all_webhooked(receiver, payment_ids)
+
+    assert time.monotonic() - started < 5  # serially this would take 10 s
+
+
+async def test_payments_are_processed_one_at_a_time_with_concurrency_one(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    await start_consumer(
+        consumer_concurrency=1, emulator_min_delay=1, emulator_max_delay=1
+    )
+
+    payment_ids = await create_payments(api, receiver, 3)
+    await all_webhooked(receiver, payment_ids)
+
+    arrivals = sorted(receiver.arrivals[p][0] for p in payment_ids)
+    gaps = [
+        later - earlier for earlier, later in zip(arrivals, arrivals[1:], strict=False)
+    ]
+    assert all(gap >= 0.9 for gap in gaps), gaps  # each waits out the 1 s Emulator
+
+
+async def test_stop_finishes_in_flight_messages_and_a_restart_does_the_rest(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    db: AsyncEngine,
+    start_consumer: Callable[..., Awaitable[Any]],
+) -> None:
+    app = await start_consumer(
+        consumer_concurrency=3, emulator_min_delay=1.5, emulator_max_delay=1.5
+    )
+    payment_ids = await create_payments(api, receiver, 6)
+    for payment_id in payment_ids:
+        await eventually(lambda p=payment_id: published_at(db, p))
+    await asyncio.sleep(0.5)  # three Emulator runs are now under way
+
+    await app.stop()
+
+    settled = [p for p in payment_ids if receiver.for_payment(p)]
+    assert len(settled) == 3  # the in-flight ones finished and sent their Webhooks
+    for payment_id in settled:
+        assert (await get_payment(api, payment_id))["status"] == "succeeded"
+    waiting = [p for p in payment_ids if p not in settled]
+    for payment_id in waiting:
+        assert (await get_payment(api, payment_id))["status"] == "pending"
+
+    await start_consumer(consumer_concurrency=3)
+    await all_webhooked(receiver, payment_ids)
+    await asyncio.sleep(0.3)  # a redelivered message would add a second call
+
+    for payment_id in payment_ids:
+        calls = receiver.for_payment(payment_id)
+        payment = await get_payment(api, payment_id)
+        assert len(calls) == 1  # acked once: no duplicate Emulator run or Webhook
+        assert calls[0]["processed_at"] == payment["processed_at"]
+        assert payment["status"] == calls[0]["status"] == "succeeded"
+
+
+async def test_log_lines_from_api_and_consumer_are_json_with_the_payment_id(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    stream = io.StringIO()
+    handler = json_handler(stream)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    previous_level = root.level
+    root.setLevel(logging.INFO)
+    try:
+        receiver.status = 500  # a Delivery failure makes the consumer log a retry
+        await start_consumer()
+        payment_id = await create_payment(api, receiver.url)
+        await webhooks_for(receiver, payment_id, 2)
+        other_id = await create_payment(api, receiver.url)
+        await webhooks_for(receiver, other_id, 1)
+        await get_payment(api, payment_id)
+        await get_payment(api, other_id)
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert records
+    for record in records:
+        assert {"timestamp", "level", "logger", "message"} <= record.keys()
+    about = [r for r in records if r.get("payment_id") == payment_id]
+    assert {"payments.api.payments", "payments.consumer.handler"} <= {
+        r["logger"] for r in about
+    }, about
+    api_messages = [
+        r["message"] for r in about if r["logger"] == "payments.api.payments"
+    ]
+    assert sorted(api_messages) == ["payment created", "payment fetched"]
+    framework = [r for r in records if r["logger"] == "payments.faststream"]
+    assert any(r.get("message_id") for r in framework)  # FastStream's extras survive
+    assert any("retrying" in r["message"] for r in about)  # failure routing is tagged
+
+
+async def test_graceful_timeout_bounds_the_wait_for_in_flight_messages(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    db: AsyncEngine,
+    start_consumer: Callable[..., Awaitable[Any]],
+) -> None:
+    app = await start_consumer(
+        consumer_concurrency=3,
+        emulator_min_delay=1.5,
+        emulator_max_delay=1.5,
+        graceful_timeout=0.2,
+    )
+    payment_ids = await create_payments(api, receiver, 3)
+    for payment_id in payment_ids:
+        await eventually(lambda p=payment_id: published_at(db, p))
+    await asyncio.sleep(0.5)  # all three Emulator runs are under way
+
+    await app.stop()
+
+    assert not [p for p in payment_ids if receiver.for_payment(p)]  # gave up waiting
+    await start_consumer(consumer_concurrency=3)
+    await all_webhooked(receiver, payment_ids)
+    await asyncio.sleep(0.3)
+    for payment_id in payment_ids:
+        (call,) = receiver.for_payment(payment_id)
+        payment = await get_payment(api, payment_id)
+        assert payment["status"] == call["status"] == "succeeded"
+        assert payment["processed_at"] == call["processed_at"]
+
+
+async def test_stopping_does_not_wait_out_a_long_relay_poll_interval(
+    start_consumer: Callable[..., Awaitable[Any]],
+) -> None:
+    app = await start_consumer(relay_poll_interval=30)
+    await asyncio.sleep(0.3)  # the Relay is idle, in its poll pause
+
+    started = time.monotonic()
+    await app.stop()
+
+    assert time.monotonic() - started < 1

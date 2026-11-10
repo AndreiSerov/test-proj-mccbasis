@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     retry_delays: Annotated[tuple[float, ...], NoDecode] = (1, 2, 4)
     webhook_timeout: float = 5
     consumer_concurrency: int = 10
+    graceful_timeout: float = 30
+    """Seconds the consumer waits on shutdown for in-flight messages and the Relay."""
 
     relay_batch_size: int = 100
     relay_poll_interval: float = 0.5

@@ -55,4 +55,7 @@ class PaymentHandler:
             if payment.status == PaymentStatus.pending:
                 payment.status = await self._emulator.run()
                 payment.processed_at = datetime.now(UTC)
+                logger.info(
+                    "payment %s", payment.status
+                )  # tagged by the message context
             return webhook_payload(payment), payment.webhook_url

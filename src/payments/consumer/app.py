@@ -3,7 +3,7 @@ import uuid
 
 import httpx
 from faststream import FastStream
-from faststream.rabbit import RabbitBroker, RabbitMessage
+from faststream.rabbit import Channel, RabbitBroker, RabbitMessage
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -21,11 +21,16 @@ from payments.consumer.topology import (
     PAYMENTS_NEW_QUEUE,
     declare_retry_topology,
 )
+from payments.core.logging import configure_logging, payment_context
 from payments.core.settings import Settings, load_settings
 from payments.db.models import OutboxEvent
 from payments.domain.emulator import Emulator
 
 logger = logging.getLogger(__name__)
+
+
+POOL_MARGIN = 2
+"""Connections beyond one per handler: the Relay's, plus one spare."""
 
 
 class PaymentNewMessage(BaseModel):
@@ -38,7 +43,13 @@ class _Resources:
     """What the consumer opens at startup and closes at shutdown."""
 
     def __init__(self, settings: Settings, broker: RabbitBroker) -> None:
-        self.engine: AsyncEngine = create_async_engine(settings.database_url)
+        # Every in-flight handler holds a connection through the Emulator, and the
+        # Relay holds one per iteration: size for both, with no overflow beyond it.
+        self.engine: AsyncEngine = create_async_engine(
+            settings.database_url,
+            pool_size=settings.consumer_concurrency + POOL_MARGIN,
+            max_overflow=0,
+        )
         self.http = httpx.AsyncClient()
         session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         self.handler = PaymentHandler(
@@ -76,13 +87,27 @@ class _Resources:
 
 
 def create_app(settings: Settings) -> FastStream:
-    broker = RabbitBroker(settings.rabbitmq_url)
+    # The library's own "faststream" logger prints a non-JSON format and does not
+    # propagate; a plain stdlib logger sends its lines through the JSON handler.
+    framework_logger = logging.getLogger("payments.faststream")
+    broker = RabbitBroker(
+        settings.rabbitmq_url,
+        graceful_timeout=settings.graceful_timeout,
+        logger=framework_logger,
+    )
     state: dict[str, _Resources] = {}
     failures = FailureRouter(broker.publish, settings.retry_delays)
 
-    @broker.subscriber(PAYMENTS_NEW_QUEUE, PAYMENTS_EXCHANGE)
+    # RabbitMQ delivers at most `prefetch_count` unacked messages, each handled in
+    # its own task, so the prefetch is the concurrency.
+    @broker.subscriber(
+        PAYMENTS_NEW_QUEUE,
+        PAYMENTS_EXCHANGE,
+        channel=Channel(prefetch_count=settings.consumer_concurrency),
+    )
     async def handle_payment_new(message: RabbitMessage) -> None:
         # Parsing is inside the guard too: a malformed body is a failed message.
+        payment_id: uuid.UUID | None = None
         try:
             try:
                 payment_id = PaymentNewMessage.model_validate_json(
@@ -90,11 +115,13 @@ def create_app(settings: Settings) -> FastStream:
                 ).payment_id
             except ValidationError as error:
                 raise Unprocessable(f"malformed message: {error}") from error
-            await state["resources"].handler.handle(payment_id)
+            with payment_context(payment_id):
+                await state["resources"].handler.handle(payment_id)
         except Exception as error:
-            await failures.on_failed_message(message, error)
+            with payment_context(payment_id):
+                await failures.on_failed_message(message, error)
 
-    app = FastStream(broker)
+    app = FastStream(broker, logger=framework_logger)
 
     @app.on_startup
     async def open_resources() -> None:
@@ -120,4 +147,5 @@ def create_app(settings: Settings) -> FastStream:
 
 
 def app_factory() -> FastStream:
+    configure_logging()
     return create_app(load_settings())

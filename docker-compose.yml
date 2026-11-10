@@ -56,6 +56,9 @@ services:
   consumer:
     <<: *app
     command: ["faststream", "run", "payments.consumer.app:app_factory", "--factory"]
+    # On SIGTERM: Relay stop (up to 5 s), then in-flight messages finish
+    # (up to GRACEFUL_TIMEOUT, default 30 s), plus margin.
+    stop_grace_period: 45s
     depends_on: *ready
 
 volumes:

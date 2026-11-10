@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import Annotated
 
@@ -8,10 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from payments.api.auth import ApiKeyAuth
 from payments.api.schemas import PaymentAccepted, PaymentOut
+from payments.core.logging import payment_context
 from payments.db.models import IDEMPOTENCY_KEY_CONSTRAINT, OutboxEvent, Payment
 from payments.domain.create_payment import CreatePayment
 from payments.domain.payment import PAYMENT_NEW_EVENT
 from payments.domain.request_hash import request_hash
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/payments", dependencies=[ApiKeyAuth])
 
@@ -91,6 +95,8 @@ async def create_payment(
             if winner is None:  # pragma: no cover - the row cannot vanish
                 raise
             return _replay(winner, new_hash)
+    with payment_context(payment.id):
+        logger.info("payment created")
     return PaymentAccepted.from_payment(payment)
 
 
@@ -99,4 +105,6 @@ async def get_payment(payment_id: uuid.UUID, session: DbSession) -> Payment:
     payment = await session.get(Payment, payment_id)
     if payment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+    with payment_context(payment_id):
+        logger.info("payment fetched")
     return payment

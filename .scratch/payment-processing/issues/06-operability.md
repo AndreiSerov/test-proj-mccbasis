@@ -4,9 +4,13 @@
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] With concurrency 10 and a 1 s Emulator delay, 10 Payments finish in well under 10 s; with concurrency 1 they are processed one at a time
-- [ ] Stopping the consumer during processing finishes in-flight messages, and a restart processes the rest with no duplicate Emulator runs
-- [ ] Log records are valid JSON and include `payment_id` where one applies
-- [ ] `scripts/check` passes
+- [x] With concurrency 10 and a 1 s Emulator delay, 10 Payments finish in well under 10 s; with concurrency 1 they are processed one at a time
+- [x] Stopping the consumer during processing finishes in-flight messages, and a restart processes the rest with no duplicate Emulator runs
+- [x] Log records are valid JSON and include `payment_id` where one applies
+- [x] `scripts/check` passes
+
+## Comments
+
+- 2026-11-10: Done. Reviewed (no blockers; 6 fixes). Added GRACEFUL_TIMEOUT (30 s) beyond the spec's settings, approved; Relay stop is capped at 5 s and the compose grace period is 45 s. The Relay's cancel-after-timeout fallback is not tested. Compose smoke test: all log lines JSON, consumer stop exits 0. scripts/check: 97 passed under Podman.

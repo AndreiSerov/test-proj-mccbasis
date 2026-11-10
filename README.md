@@ -41,6 +41,12 @@ A Delivery failure (Webhook non-2xx or timeout, DB error) is retried through Rab
 
 To inspect the DLQ: `curl -u guest:guest localhost:15672/api/queues/%2F/payments.new.dlq`, or the management UI. Re-driving a parked message is manual (publish its body again to the `payments` exchange with routing key `payments.new`).
 
+## Concurrency, shutdown and logs
+
+- `CONSUMER_CONCURRENCY` (default 10) is how many messages one consumer process handles at once; it is also the RabbitMQ prefetch, so the broker never hands out more. The consumer's database pool is sized `CONSUMER_CONCURRENCY + 2` (each in-flight handler holds a connection through the Emulator, plus the Relay's).
+- On SIGTERM the Relay finishes its current iteration and stops, the consumer stops taking new messages, and in-flight messages finish and are acked before the connection closes (the Relay gets up to 5 s, then in-flight messages up to `GRACEFUL_TIMEOUT`, default 30 s; compose gives the consumer a 45 s grace period, so raise it if you raise the timeout). Anything unacked is redelivered, which is safe because the handler is idempotent.
+- API and consumer log one JSON object per line to stderr (`timestamp`, `level`, `logger`, `message`, `exception` when there is one), with a `payment_id` field on records about a Payment. Logging is configured by the app factories, so it applies under `uvicorn` and `faststream run`.
+
 ## Check
 
 ```

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import socket
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -15,6 +16,8 @@ class WebhookReceiver:
 
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.arrivals: dict[str, list[float]] = {}
+        """payment_id -> time.monotonic() of each call's arrival."""
         self.status = 200
         self.delay = 0.0
         self.script: list[tuple[int, float]] = []
@@ -38,6 +41,7 @@ class WebhookReceiver:
                 break
         payload = json.loads(body)
         self.requests.append(payload)
+        self.arrivals.setdefault(payload["payment_id"], []).append(time.monotonic())
         status, delay = self.script.pop(0) if self.script else (self.status, self.delay)
         if delay:
             await asyncio.sleep(delay)

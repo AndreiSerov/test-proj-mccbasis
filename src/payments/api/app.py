@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from payments.api.payments import router as payments_router
+from payments.core.logging import configure_logging
 from payments.core.settings import Settings, load_settings
 
 
@@ -23,4 +24,5 @@ def create_app(settings: Settings) -> FastAPI:
 
 
 def app_factory() -> FastAPI:
+    configure_logging()
     return create_app(load_settings())
