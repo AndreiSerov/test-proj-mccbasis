@@ -4,9 +4,13 @@
 
 **Blocked by:** 03, 05, 06
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `docker compose up` still starts only the required services; `docker compose --profile demo up` adds the webhook-sink
-- [ ] Every README curl example has been run against compose and gives the documented result (manual)
-- [ ] The README describes the architecture, the guarantees and the trade-offs, consistent with the ADRs and the glossary
-- [ ] `scripts/check` passes
+- [x] `docker compose up` still starts only the required services; `docker compose --profile demo up` adds the webhook-sink
+- [x] Every README curl example has been run against compose and gives the documented result (manual)
+- [x] The README describes the architecture, the guarantees and the trade-offs, consistent with the ADRs and the glossary
+- [x] `scripts/check` passes
+
+## Comments
+
+- 2026-11-10: Done. Reviewed together with a final check against the original task (all requirements met; interpretations of API key scope and attempt count stated in the README). Every README example run against the demo stack under Podman, including the single-message DLQ re-drive. Not run with Docker as the engine. scripts/check: 99 passed.

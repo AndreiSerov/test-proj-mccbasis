@@ -10,6 +10,12 @@ if [[ -z "$engine" ]]; then
   if command -v podman >/dev/null; then engine=podman; else engine=docker; fi
 fi
 
+if [[ "$engine" == podman ]] && ! podman info >/dev/null 2>&1; then
+  echo "Podman is installed but not responding (is its machine stopped?)." >&2
+  echo "Start it with \`podman machine start\`, or set CONTAINER_ENGINE=docker." >&2
+  exit 1
+fi
+
 case "$engine" in
   podman | docker) exec "$engine" compose "$@" ;;
   *) echo "CONTAINER_ENGINE must be podman or docker, got: $engine" >&2; exit 2 ;;
