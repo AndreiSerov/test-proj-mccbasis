@@ -4,10 +4,14 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done (Docker checks pending)
 
 - [ ] `docker compose up` brings up postgres, rabbitmq, migrate (exits 0), api and consumer, and `GET /health` returns 200
-- [ ] All settings from the spec exist with their defaults (`DATABASE_URL`, `RABBITMQ_URL`, `API_KEY`, Emulator, retry, Webhook, concurrency and Relay settings)
+- [x] All settings from the spec exist with their defaults (`DATABASE_URL`, `RABBITMQ_URL`, `API_KEY`, Emulator, retry, Webhook, concurrency and Relay settings)
 - [ ] A system test against the testcontainers harness hits `/health` and passes
-- [ ] Without Docker, integration tests are skipped with a clear reason, not failed
-- [ ] `scripts/check` passes
+- [x] Without Docker, integration tests are skipped with a clear reason, not failed
+- [x] `scripts/check` passes
+
+## Comments
+
+- 2026-11-10: Implemented in 8276b36. NOT RUN because the Docker daemon was down: `docker compose up` with `/health`, and the testcontainers harness smoke test (`tests/system/test_harness.py`). `docker-compose config` validates. The `/health` system test runs without containers.
