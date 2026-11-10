@@ -31,6 +31,10 @@ curl localhost:8000/api/v1/payments/<payment_id> -H 'X-API-Key: dev-api-key'
 
 `Idempotency-Key` makes creates safe to retry. A repeated key with the same body (same Request hash: key order in `metadata` and `10.5` vs `10.50` do not matter) returns 202 with the original Payment's `payment_id`, `created_at` and its current `status`, and creates nothing new. The same key with a different body returns 409. Concurrent creates with one key yield exactly one Payment.
 
+## What happens after create
+
+The API writes the Payment and an Outbox event in one transaction. The consumer's Relay (an asyncio task, ADR-0001) publishes unpublished events to the `payments` exchange and sets `published_at`. The `payments.new` handler locks the Payment, runs the Emulator (2-5 s, 90% success; configurable) if it is still `pending`, commits `succeeded` or `failed` with `processed_at`, then POSTs the Webhook `{payment_id, status, amount, currency, processed_at, metadata}` to `webhook_url` (2xx = delivered). Delivery is at least once, so make your receiver idempotent on `payment_id`. Retries and the DLQ are not built yet.
+
 ## Check
 
 ```

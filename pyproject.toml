@@ -12,6 +12,7 @@ dependencies = [
     "alembic",
     "pydantic-settings",
     "httpx",
+    "pamqp>=5.0.0",
 ]
 
 [dependency-groups]

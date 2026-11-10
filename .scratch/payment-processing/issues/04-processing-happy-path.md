@@ -4,11 +4,15 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] With success rate 1.0: create → one Webhook with `succeeded` → GET shows `succeeded` and `processed_at`
-- [ ] With success rate 0.0: one Webhook with `failed`, and the Payment is `failed`
-- [ ] The Outbox event gets `published_at` after a create
-- [ ] Publishing the same event twice runs the Emulator once and keeps the final status unchanged
-- [ ] Unit tests: the Emulator with a seeded random source and fake sleep respects the success rate and delay bounds
-- [ ] System tests use a stub Webhook receiver; `scripts/check` passes
+- [x] With success rate 1.0: create → one Webhook with `succeeded` → GET shows `succeeded` and `processed_at`
+- [x] With success rate 0.0: one Webhook with `failed`, and the Payment is `failed`
+- [x] The Outbox event gets `published_at` after a create
+- [x] Publishing the same event twice runs the Emulator once and keeps the final status unchanged
+- [x] Unit tests: the Emulator with a seeded random source and fake sleep respects the success rate and delay bounds
+- [x] System tests use a stub Webhook receiver; `scripts/check` passes
+
+## Comments
+
+- 2026-11-10: Done. Reviewed (1 blocker fixed: unroutable publishes were marked published; now only a Basic.Ack counts). Delivery failures go through on_delivery_failure(message, error), which still logs and acks until ticket 05. Compose smoke test: pending -> succeeded. scripts/check: 74 passed under Podman.
