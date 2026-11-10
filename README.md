@@ -16,6 +16,21 @@ CONTAINER_ENGINE=docker scripts/compose up --build  # force Docker
 - API on http://localhost:8000 (`GET /health`; protected routes use `X-API-Key: dev-api-key`)
 - RabbitMQ management UI on http://localhost:15672 (guest / guest)
 
+## API
+
+All `/api/v1/*` routes require `X-API-Key`; `/health` is open. `amount` is a string in responses.
+
+```
+curl -X POST localhost:8000/api/v1/payments \
+  -H 'X-API-Key: dev-api-key' -H 'Idempotency-Key: order-42' -H 'Content-Type: application/json' \
+  -d '{"amount": "10.50", "currency": "USD", "description": "Order 42", "metadata": {"order_id": 42}, "webhook_url": "https://example.com/hook"}'
+# 202 {"payment_id": "...", "status": "pending", "created_at": "..."}
+
+curl localhost:8000/api/v1/payments/<payment_id> -H 'X-API-Key: dev-api-key'
+```
+
+A repeated `Idempotency-Key` is currently rejected with an error; ticket 03 adds the replay of the original Payment and the 409 for a different body.
+
 ## Check
 
 ```

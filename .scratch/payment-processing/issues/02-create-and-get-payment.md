@@ -4,12 +4,16 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Create returns 202 with `pending`; GET returns all fields with `amount` as a string and `processed_at` null
-- [ ] Each create leaves exactly one Payment and one unpublished Outbox event, written atomically
-- [ ] 401 without a key or with a wrong one on both endpoints; `/health` stays open
-- [ ] 422 for a missing `Idempotency-Key`, amount ≤ 0, more than 2 decimals, unknown currency, bad description length, malformed webhook_url, non-UUID id
-- [ ] 404 for an unknown payment id
-- [ ] Migration upgrades and downgrades cleanly
-- [ ] System tests through the API cover the above; `scripts/check` passes
+- [x] Create returns 202 with `pending`; GET returns all fields with `amount` as a string and `processed_at` null
+- [x] Each create leaves exactly one Payment and one unpublished Outbox event, written atomically
+- [x] 401 without a key or with a wrong one on both endpoints; `/health` stays open
+- [x] 422 for a missing `Idempotency-Key`, amount ≤ 0, more than 2 decimals, unknown currency, bad description length, malformed webhook_url, non-UUID id
+- [x] 404 for an unknown payment id
+- [x] Migration upgrades and downgrades cleanly
+- [x] System tests through the API cover the above; `scripts/check` passes
+
+## Comments
+
+- 2026-11-10: Done. Reviewed (no blockers; 9 fixes applied). scripts/check: 33 passed under Podman. Atomicity rests on the single transaction; no failure-injection test.
