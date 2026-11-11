@@ -17,6 +17,8 @@ class Settings(BaseSettings):
 
     retry_delays: Annotated[tuple[float, ...], NoDecode] = (1, 2, 4)
     webhook_timeout: float = 5
+    webhook_allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
+    """Hostnames or IPs whose Webhooks skip the Blocked address check."""
     consumer_concurrency: int = 10
     graceful_timeout: float = 30
     """Seconds the consumer waits on shutdown for in-flight messages and the Relay."""
@@ -31,6 +33,15 @@ class Settings(BaseSettings):
     def _split_retry_delays(cls, value: object) -> object:
         if isinstance(value, str):
             return tuple(float(part) for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("webhook_allowed_hosts", mode="before")
+    @classmethod
+    def _split_allowed_hosts(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(
+                part.strip().lower() for part in value.split(",") if part.strip()
+            )
         return value
 
 

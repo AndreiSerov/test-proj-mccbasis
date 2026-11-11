@@ -39,7 +39,15 @@ One of the TTL queues `payments.new.retry.{1s,2s,4s}` that hold a message for it
 _Avoid_: Delay queue, backoff queue
 
 **Unprocessable message**:
-A message that can never be processed (malformed body, unknown Payment); it goes straight to the DLQ without retries.
+A message that can never be processed (malformed body, unknown Payment, a Webhook host that resolves to a Blocked address); it goes straight to the DLQ without retries.
+
+**Blocked address**:
+An IP address a Webhook must never be sent to: loopback, private, link-local (including `169.254.169.254`), unspecified, multicast or reserved, IPv4 or IPv6 (an IPv4-mapped IPv6 address counts as its IPv4). The consumer refuses a Webhook whose host resolves to any Blocked address, unless the host is in the Allowed hosts.
+_Avoid_: Internal IP, forbidden address
+
+**Allowed hosts**:
+The hostnames or IPs in `WEBHOOK_ALLOWED_HOSTS` (exact, case-insensitive match) whose Webhooks skip the Blocked address check.
+_Avoid_: Whitelist
 
 **DLQ**:
 The `payments.new.dlq` queue that holds messages still failing after 3 retries, and messages that can never be processed (malformed body, unknown Payment), with the last error in a header.

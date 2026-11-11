@@ -61,6 +61,7 @@ class _Resources:
             ),
             http=self.http,
             webhook_timeout=settings.webhook_timeout,
+            webhook_allowed_hosts=settings.webhook_allowed_hosts,
         )
 
         async def publish(event: OutboxEvent) -> None:
@@ -91,6 +92,8 @@ def create_app(settings: Settings) -> FastStream:
     # The library's own "faststream" logger prints a non-JSON format and does not
     # propagate; a plain stdlib logger sends its lines through the JSON handler.
     framework_logger = logging.getLogger("payments.faststream")
+    # httpx logs every request's full URL at INFO, userinfo and query included.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     broker = RabbitBroker(
         settings.rabbitmq_url,
         graceful_timeout=settings.graceful_timeout,

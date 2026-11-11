@@ -523,3 +523,24 @@ async def test_losing_the_insert_race_with_a_different_body_returns_409(
     )
 
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/hook",
+        "http://[::1]/hook",
+        "http://169.254.169.254/latest/meta-data",
+        "http://10.0.0.1/hook",
+        "http://localhost/hook",
+    ],
+)
+async def test_webhook_url_with_an_internal_host_is_rejected_with_422(
+    client: httpx.AsyncClient, url: str
+) -> None:
+    response = await client.post(
+        "/api/v1/payments",
+        json=valid_body(webhook_url=url),
+        headers=headers(),
+    )
+    assert response.status_code == 422

@@ -12,6 +12,8 @@ x-app: &app
     - EMULATOR_SUCCESS_RATE
     - RETRY_DELAYS
     - WEBHOOK_TIMEOUT
+    # The demo sink lives on a private address, so it is allowlisted by default.
+    - WEBHOOK_ALLOWED_HOSTS=${WEBHOOK_ALLOWED_HOSTS:-webhook-sink}
     - CONSUMER_CONCURRENCY
     - RELAY_BATCH_SIZE
     - RELAY_POLL_INTERVAL

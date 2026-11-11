@@ -14,6 +14,7 @@ from payments.db.models import IDEMPOTENCY_KEY_CONSTRAINT, OutboxEvent, Payment
 from payments.domain.create_payment import CreatePayment
 from payments.domain.payment import PAYMENT_NEW_EVENT
 from payments.domain.request_hash import request_hash
+from payments.domain.webhook_url import rejected_literal
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,14 @@ async def create_payment(
     body: CreatePayment,
     session: DbSession,
     idempotency_key: Annotated[str, Header(min_length=1, max_length=255)],
+    request: Request,
 ) -> PaymentAccepted:
+    allowed_hosts = request.app.state.settings.webhook_allowed_hosts
+    if rejected_literal(str(body.webhook_url), allowed_hosts):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "webhook_url must not point at localhost or a blocked IP address",
+        )
     new_hash = request_hash(body)
     async with session.begin():
         existing = await _find_by_key(session, idempotency_key)

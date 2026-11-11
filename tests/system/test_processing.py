@@ -55,7 +55,11 @@ async def db(migrated_settings: Settings) -> AsyncIterator[AsyncEngine]:
 
 @pytest.fixture
 async def api(migrated_settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_api(migrated_settings)
+    # The API accepts the receiver's 127.0.0.1; the consumer's check is tested
+    # on its own by starting it with another allowlist.
+    app = create_api(
+        migrated_settings.model_copy(update={"webhook_allowed_hosts": LOCAL})
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -82,6 +86,7 @@ async def clean_slate(migrated_settings: Settings, db: AsyncEngine) -> None:
         await _purge_if_exists(migrated_settings, name)
 
 
+LOCAL = ("127.0.0.1",)
 DLQ = "payments.new.dlq"
 SHORT_DELAYS = (0.1, 0.2, 0.4)
 RETRY_QUEUES = [f"payments.new.retry.{d}s" for d in SHORT_DELAYS]
@@ -136,6 +141,7 @@ async def start_consumer(
                 "relay_poll_interval": 0.05,
                 "webhook_timeout": 2,
                 "retry_delays": SHORT_DELAYS,
+                "webhook_allowed_hosts": LOCAL,  # the receiver listens on 127.0.0.1
                 **overrides,
             }
         )
@@ -731,3 +737,71 @@ async def test_stopping_does_not_wait_out_a_long_relay_poll_interval(
     await app.stop()
 
     assert time.monotonic() - started < 1
+
+
+async def test_webhook_to_a_blocked_address_goes_to_the_dlq_after_one_attempt(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    await start_consumer(webhook_allowed_hosts=())  # 127.0.0.1 is not allowlisted
+    payment_id = await create_payment(api, receiver.url)
+
+    (message,) = await dlq_messages(migrated_settings, payment_id)
+
+    assert "blocked address" in str(message.headers["x-last-error"])
+    assert message.headers["x-attempt"] == 1  # no retries
+    await asyncio.sleep(0.5)  # longer than all retry delays
+    assert receiver.requests == []  # nothing reached the host
+    assert (await get_payment(api, payment_id))["status"] == "succeeded"
+
+
+async def test_webhook_to_an_allowlisted_host_is_delivered(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    await start_consumer(webhook_allowed_hosts=("other.example", "127.0.0.1"))
+    payment_id = await create_payment(api, receiver.url)
+
+    await webhooks_for(receiver, payment_id, 1)
+
+    await assert_dlq_empty(migrated_settings)
+
+
+async def test_userinfo_and_query_never_reach_logs_or_x_last_error(
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[None]],
+) -> None:
+    secret_url = receiver.url.replace("http://", "http://user:secret@") + "?token=x"
+    stream = io.StringIO()
+    handler = json_handler(stream)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    previous_level = root.level
+    root.setLevel(logging.DEBUG)
+    try:
+        receiver.status = 500  # fails every attempt: the DLQ gets the last error
+        await start_consumer()
+        payment_id = await create_payment(api, secret_url)
+        (message,) = await dlq_messages(migrated_settings, payment_id)
+        await start_consumer(webhook_allowed_hosts=())  # and a refused one
+        blocked_id = await create_payment(api, secret_url)
+        blocked, *_ = await dlq_messages(migrated_settings, blocked_id)
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+    assert "500" in str(message.headers["x-last-error"])
+    assert receiver.for_payment(payment_id)  # the URL did work
+    stored = (await get_payment(api, payment_id))["webhook_url"]
+    assert stored == secret_url  # the stored Payment keeps the URL as given
+    shown = str(message.headers["x-last-error"]) + stream.getvalue()
+    for output in (shown, str(blocked.headers["x-last-error"])):
+        assert "secret" not in output
+        assert "token=x" not in output
+    assert "?…" in str(message.headers["x-last-error"])

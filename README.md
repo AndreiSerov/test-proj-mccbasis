@@ -161,7 +161,7 @@ All `/api/v1/*` routes need `X-API-Key`; `/health` does not.
 
 | Endpoint | Request | Success | Errors |
 |---|---|---|---|
-| `POST /api/v1/payments` | Headers: `X-API-Key`, `Idempotency-Key` (required, 1-255 chars). Body: `amount` (decimal, > 0, at most 2 places), `currency` (`RUB`, `USD`, `EUR`), `description` (1-255 chars), `metadata` (JSON object, default `{}`), `webhook_url` (HTTP(S) URL) | `202` `{"payment_id", "status", "created_at"}` | `401` bad or missing key; `409` same key, different body; `422` invalid body or missing `Idempotency-Key` |
+| `POST /api/v1/payments` | Headers: `X-API-Key`, `Idempotency-Key` (required, 1-255 chars). Body: `amount` (decimal, > 0, at most 2 places), `currency` (`RUB`, `USD`, `EUR`), `description` (1-255 chars), `metadata` (JSON object, default `{}`), `webhook_url` (HTTP(S) URL, not `localhost` or a literal blocked IP) | `202` `{"payment_id", "status", "created_at"}` | `401` bad or missing key; `409` same key, different body; `422` invalid body, blocked `webhook_url` host or missing `Idempotency-Key` |
 | `GET /api/v1/payments/{payment_id}` | Header: `X-API-Key` | `200` `{"id", "amount", "currency", "description", "metadata", "status", "webhook_url", "created_at", "processed_at"}` | `401`; `404` unknown id; `422` id is not a UUID |
 | `GET /health` | none | `200` `{"status": "ok"}` | none |
 
@@ -183,6 +183,7 @@ Environment variables, read by the API and the consumer. Compose sets the three 
 | `EMULATOR_SUCCESS_RATE` | `0.9` | probability that the Emulator succeeds; the rest are Declines |
 | `RETRY_DELAYS` | `1,2,4` | seconds before each retry; one Retry queue per entry, and the number of entries is the number of retries |
 | `WEBHOOK_TIMEOUT` | `5` | seconds before a Webhook call counts as failed |
+| `WEBHOOK_ALLOWED_HOSTS` | empty (compose: `webhook-sink`) | comma-separated hostnames or IPs whose Webhooks skip the Blocked address check |
 | `CONSUMER_CONCURRENCY` | `10` | messages one consumer process handles at once (also the RabbitMQ prefetch); the DB pool is this + 2 |
 | `GRACEFUL_TIMEOUT` | `30` | seconds the consumer waits on SIGTERM for in-flight messages (the Relay gets up to 5 s first); compose gives it a 45 s `stop_grace_period`, so raise that too if you raise this |
 | `RELAY_BATCH_SIZE` | `100` | Outbox events the Relay claims per iteration |
@@ -221,6 +222,7 @@ Podman notes:
 ## Guarantees and trade-offs
 
 - **At least once to the broker.** A crash between publishing an event and marking `published_at` re-publishes it. The handler absorbs duplicates.
+- **Webhook URLs cannot reach internal hosts.** The consumer resolves the Webhook host at send time and refuses it (Unprocessable: straight to the DLQ, reason in `x-last-error`) if any address is a Blocked address (loopback, private, link-local, unspecified, multicast, reserved). The request then goes to the checked IP with the original `Host` header and, for HTTPS, the original name for SNI and certificate verification, so DNS rebinding cannot swap the address. Only the first checked address is tried; a DNS failure is an ordinary Delivery failure. `WEBHOOK_ALLOWED_HOSTS` skips the check for exact hosts (the demo allowlists `webhook-sink`). The API also answers `422` for `localhost` and literal Blocked IPs. Logs and `x-last-error` show the URL without userinfo and with the query as `?…`; the stored Payment keeps the URL as given.
 - **At least once Webhooks.** A Webhook may arrive more than once (a retry after a timeout the client actually processed, a duplicate message). **Receivers must dedupe on `payment_id`.** The Webhook is not signed.
 - **Relay polling latency.** Events are picked up by polling, up to `RELAY_POLL_INTERVAL` (0.5 s) after commit, instead of being pushed.
 - **Emulator inside the row lock.** The Payment row is locked for the whole Emulator delay (2-5 s), which is what makes duplicate handling safe, at the cost of one pooled DB connection per in-flight message. That is why the pool is `CONSUMER_CONCURRENCY + 2`.
