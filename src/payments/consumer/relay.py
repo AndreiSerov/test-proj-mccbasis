@@ -31,11 +31,13 @@ class Relay:
         publish: Publish,
         batch_size: int,
         poll_interval: float,
+        publish_timeout: float,
     ) -> None:
         self._session_factory = session_factory
         self._publish = publish
         self._batch_size = batch_size
         self._poll_interval = poll_interval
+        self._publish_timeout = publish_timeout
         self._stopping = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -75,7 +77,15 @@ class Relay:
                 await self._pause(self._poll_interval)
 
     async def publish_batch(self) -> int:
-        """Claim, publish and mark one batch in a single transaction."""
+        """Claim one batch, publish it in id order and mark each confirmed event.
+
+        The claim keeps its row locks for the whole batch. When a publish fails
+        or times out, the events confirmed before it are still marked and
+        committed, then the error is raised: the failed event and the ones after
+        it stay unpublished for the next iteration.
+        """
+        failure: BaseException | None = None
+        published = 0
         async with self._session_factory() as session, session.begin():
             events = (
                 (
@@ -91,6 +101,13 @@ class Relay:
                 .all()
             )
             for event in events:
-                await self._publish(event)
+                try:
+                    await asyncio.wait_for(self._publish(event), self._publish_timeout)
+                except Exception as error:  # commit the confirmed prefix first
+                    failure = error
+                    break
                 event.published_at = datetime.now(UTC)
-        return len(events)
+                published += 1
+        if failure is not None:
+            raise failure
+        return published

@@ -8,9 +8,13 @@ Keep `FOR UPDATE SKIP LOCKED` claiming, so several consumer replicas stay safe. 
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A test with a publish that fails on one event in a batch shows every event before it published exactly once, and the failing event and the ones after it published after the failure clears, in id order
-- [ ] A test with a publish that never confirms shows the Relay iteration fails within `RELAY_PUBLISH_TIMEOUT` instead of hanging, and a later iteration publishes the event
-- [ ] `RELAY_PUBLISH_TIMEOUT` is in Settings, forwarded by compose, and in the README configuration table
-- [ ] `scripts/check` passes
+- [x] A test with a publish that fails on one event in a batch shows every event before it published exactly once, and the failing event and the ones after it published after the failure clears, in id order
+- [x] A test with a publish that never confirms shows the Relay iteration fails within `RELAY_PUBLISH_TIMEOUT` instead of hanging, and a later iteration publishes the event
+- [x] `RELAY_PUBLISH_TIMEOUT` is in Settings, forwarded by compose, and in the README configuration table
+- [x] `scripts/check` passes
+
+## Comments
+
+2026-11-11: Chose "commit the confirmed prefix, then stop the batch" over per-event commit. The claim transaction keeps its `FOR UPDATE SKIP LOCKED` row locks for the whole batch, so a replica cannot grab the unpublished tail and double-publish it; per-event commit would release the locks after the first event. On a publish failure or timeout, `publish_batch` marks the events confirmed so far, commits, then re-raises; `_run` applies the existing error pause and the next iteration retries the failed event onward in id order. Each publish is wrapped in `asyncio.wait_for(..., RELAY_PUBLISH_TIMEOUT)` (default 5 s; Settings, compose, README table). Tests: `tests/system/test_relay.py` (failure mid-batch, hung publish). `scripts/check`: 101 passed. Not tested: multi-replica contention on the locks.

@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     relay_batch_size: int = 100
     relay_poll_interval: float = 0.5
+    relay_publish_timeout: float = 5
+    """Seconds a publish may wait for the broker's confirm before it fails."""
 
     @field_validator("retry_delays", mode="before")
     @classmethod

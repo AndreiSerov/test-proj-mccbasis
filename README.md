@@ -187,6 +187,7 @@ Environment variables, read by the API and the consumer. Compose sets the three 
 | `GRACEFUL_TIMEOUT` | `30` | seconds the consumer waits on SIGTERM for in-flight messages (the Relay gets up to 5 s first); compose gives it a 45 s `stop_grace_period`, so raise that too if you raise this |
 | `RELAY_BATCH_SIZE` | `100` | Outbox events the Relay claims per iteration |
 | `RELAY_POLL_INTERVAL` | `0.5` | seconds the Relay sleeps when there is nothing to publish |
+| `RELAY_PUBLISH_TIMEOUT` | `5` | seconds a publish may wait for the broker's confirm before it counts as failed and the batch stops |
 
 Compose also reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` (default `payments`) from the shell. For a quick demo, e.g. `EMULATOR_MIN_DELAY=0 EMULATOR_MAX_DELAY=0 scripts/compose up -d` makes payments settle instantly.
 

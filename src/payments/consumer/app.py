@@ -79,6 +79,7 @@ class _Resources:
             publish=publish,
             batch_size=settings.relay_batch_size,
             poll_interval=settings.relay_poll_interval,
+            publish_timeout=settings.relay_publish_timeout,
         )
 
     async def close(self) -> None:
