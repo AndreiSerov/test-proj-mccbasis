@@ -1,7 +1,9 @@
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from payments.domain.emulator import FailureMode
 
 
 class Settings(BaseSettings):
@@ -14,7 +16,7 @@ class Settings(BaseSettings):
     emulator_min_delay: float = 2
     emulator_max_delay: float = 5
     emulator_success_rate: float = 0.9
-    emulator_failure_mode: Literal["decline", "error"] = "decline"
+    emulator_failure_mode: FailureMode = "decline"
     """What the Emulator's non-success outcome is: a Decline, or an Emulator error."""
 
     retry_delays: Annotated[tuple[float, ...], NoDecode] = (1, 2)
