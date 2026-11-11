@@ -23,7 +23,7 @@ flowchart LR
     Handler -->|"POST Webhook"| Hook([Client webhook_url])
     Handler -.->|"Delivery failure"| R["payments.new.retry.1s / 2s<br/>(TTL, dead-letter back)"]
     R -.-> EX
-    Handler -.->|"after 3 retries,<br/>or Unprocessable message"| DLX{{"exchange payments.dlx"}}
+    Handler -.->|"after the last attempt,<br/>or Unprocessable message"| DLX{{"exchange payments.dlx"}}
     DLX --> DLQ["queue payments.new.dlq"]
     Q -.->|"rejected without requeue<br/>(broker dead-letters)"| DLX
 ```
@@ -31,7 +31,25 @@ flowchart LR
 1. The API writes the Payment (`pending`) and an Outbox event in one transaction.
 2. The Relay, an asyncio task inside the consumer, publishes unpublished Outbox events to the `payments` exchange and sets `published_at`.
 3. The `payments.new` handler locks the Payment, runs the Emulator if it is still `pending`, commits `succeeded` or `failed` and POSTs the Webhook.
-4. A Delivery failure goes through the Retry queues (1 s, 2 s, 4 s) back to `payments.new`; after that, to the DLQ.
+4. A Delivery failure goes through the Retry queues (1 s, then 2 s) back to `payments.new`; after the third attempt, to the DLQ.
+
+## Interpretation of the task
+
+The task leaves some points open. This table lists where we picked one reading. Quotes are from `docs/task/task.pdf`; the English is a gloss.
+
+| Task says | We read it as | Why |
+|---|---|---|
+| "90% успех, 10% ошибка" (90% success, 10% error) | The 10% is a Decline: the Payment becomes `failed`, the Webhook is sent, nothing is retried. `EMULATOR_FAILURE_MODE=error` gives the other reading: an Emulator error, a Delivery failure that is retried and then parked in the DLQ with the Payment still `pending`. | A business outcome the client hears about is more useful, and 10% of payments would otherwise fill the DLQ. [ADR-0003](docs/adr/0003-decline-is-not-a-failure.md). Demo in "Try it". |
+| "Retry: 3 попытки", "Dead Letter Queue для сообщений, не обработанных после 3 попыток" (3 attempts; DLQ after 3 attempts) | Three calls in total: the first attempt, a retry after 1 s and a retry after 2 s (`RETRY_DELAYS=1,2`), then the DLQ. `x-attempt` is `3` there. | The strictest count that matches both sentences. More entries in `RETRY_DELAYS` mean more retries. [ADR-0002](docs/adr/0002-broker-retry-via-ttl-queues.md). |
+| "X-API-Key для всех эндпоинтов" (X-API-Key for all endpoints) | Every endpoint needs the key, `/docs`, `/redoc` and `/openapi.json` included, except `GET /health`. An empty `API_KEY` fails at start-up. | Taken literally. `/health` stays open so container healthchecks work. |
+| "Реализует повторные попытки при ошибках отправки" (retries on sending errors) | Retried: a Webhook answered with any non-2xx (4xx too) or a timeout, DB errors, and Emulator errors in `error` mode. Not retried: a Decline, and Unprocessable messages (malformed body, unknown Payment, a Webhook host that resolves to a Blocked address), which go straight to the DLQ. | We cannot tell a permanent 4xx from a temporary one, and the receiver may fix itself within the retry window. |
+| Webhook result and Payment status | An undelivered Webhook does not change the Payment's status. Only the Emulator result does. | The Payment is what the gateway decided. The Webhook is a notification about it. |
+| "Даты создания и обработки" (creation and processing dates) | `processed_at` is the time the Emulator result was committed; it is `null` while the Payment is `pending`. `created_at` is when the API accepted it. | The moment the final status becomes visible. |
+| The Webhook body (not specified) | `{"payment_id", "status", "amount", "currency", "processed_at", "metadata"}`, POSTed as JSON, not signed. 2xx means delivered. | The smallest body that lets a receiver act without calling the API. Receivers must dedupe on `payment_id`. |
+| Idempotency (details not specified) | The same `Idempotency-Key` with the same body returns `202` with the Payment's current status. The same key with a different body is `409`. A missing key is `422`. Keys are kept forever. | A replay must be safe, and a reused key with another body is a client bug that should be loud. Expiry would need a clock and a cleanup job. |
+| Compose services (postgres, rabbitmq, api, consumer) | The Relay, which publishes the Outbox, runs inside the consumer process. | The task lists no relay service. [ADR-0001](docs/adr/0001-relay-inside-consumer.md). |
+| `amount` and `metadata` (types not specified) | `amount` is a decimal above 0 with at most 2 decimal places, in any of `RUB`, `USD`, `EUR`, and is always returned as a string. `metadata` is a JSON object, `{}` by default. | A string loses no precision. Currency is a short fixed list. |
+| Docker (the task assumes it) | `docker compose up` works as is; Podman is the default engine of `scripts/compose`, and `CONTAINER_ENGINE=docker` switches it. | See Quick start. |
 
 ## Quick start
 
@@ -147,11 +165,11 @@ curl -s -u guest:guest localhost:15672/api/queues/%2F/payments.new.dlq | python3
 
 curl -s -u guest:guest -X POST localhost:15672/api/queues/%2F/payments.new.dlq/get \
   -H 'content-type: application/json' -d '{"count":1,"ackmode":"ack_requeue_true","encoding":"auto"}'
-# [{... "headers":{"x-attempt":3,"x-last-error":"DeliveryFailure: webhook to http://webhook-sink:9000/hook?fail=1 returned 500"},
+# [{... "headers":{"x-attempt":3,"x-last-error":"DeliveryFailure: webhook to http://webhook-sink:9000/hook?… returned 500"},
 #   "payload":"{\"payment_id\":\"02676879-...\"}", ...}]
 ```
 
-The Payment itself is already `succeeded` (or `failed`): only the Webhook is stuck.
+The query string shows as `?…` because logs and `x-last-error` never show it. The Payment itself is already `succeeded` (or `failed`): only the Webhook is stuck.
 
 **Emulator error mode.** Read the Emulator's 10% as a technical error instead of a Decline. Restart the consumer so it always errors (`EMULATOR_SUCCESS_RATE=0`) and create a Payment:
 
@@ -230,14 +248,12 @@ Podman notes:
 ## Design decisions
 
 - **Outbox, one transaction.** The Payment and its Outbox event commit together, so there is never a Payment without an event, and never an event for a Payment that was rolled back. Publishing straight from the API would lose events if it died between commit and publish.
-- **The Relay runs inside the consumer** ([ADR-0001](docs/adr/0001-relay-inside-consumer.md)): the task's compose file lists no relay service. It claims rows with `FOR UPDATE SKIP LOCKED`, so more consumer replicas are safe. Published events are kept (`published_at`) as an audit trail.
+- **The Relay runs inside the consumer** ([ADR-0001](docs/adr/0001-relay-inside-consumer.md)). It claims rows with `FOR UPDATE SKIP LOCKED`, so more consumer replicas are safe. Published events are kept (`published_at`) as an audit trail.
 - **Retries are TTL queues, not sleeps** ([ADR-0002](docs/adr/0002-broker-retry-via-ttl-queues.md)): waiting messages hold no prefetch slot and survive a consumer restart. The attempt number travels in the `x-attempt` header; the DLQ message carries `x-last-error`. The consumer acks the original only after the broker confirms the republish.
-- **A Decline is not a failure** ([ADR-0003](docs/adr/0003-decline-is-not-a-failure.md)): `failed` is a normal outcome, sent by Webhook and never retried, so 10% of payments do not clog the DLQ. Only Delivery failures are retried.
+- **A Decline is not a failure** ([ADR-0003](docs/adr/0003-decline-is-not-a-failure.md)): `failed` is a normal outcome, so 10% of payments do not clog the DLQ. Only Delivery failures are retried.
 - **Idempotency key and Request hash.** The key is unique in the database. The Request hash is a SHA-256 of a canonical JSON of the validated body (sorted keys, `10.5` equals `10.50`, canonical URL), so a replay is recognised even if the JSON is written differently. Same key and same hash returns the original Payment; a different hash returns `409`. Concurrent creates race on the unique constraint: the loser re-reads the winner and applies the same rule, so exactly one Payment exists.
 - **An idempotent handler.** The handler locks the Payment with `SELECT ... FOR UPDATE`. If it is already final, it skips the Emulator and only re-sends the Webhook, so a duplicate or retried message never flips the outcome.
 - **Unprocessable messages** (malformed body, unknown `payment_id`) go straight to the DLQ without retries.
-- **API key scope.** "X-API-Key for all endpoints" is taken literally: only `/health` stays open (container healthchecks). `/docs`, `/redoc` and `/openapi.json` are served behind the key.
-- **Attempts.** "Retry: 3 attempts / DLQ after 3 attempts" is read as 3 Webhook calls in total: the first attempt plus retries after 1 s and 2 s (`RETRY_DELAYS=1,2`), then the DLQ. More delays mean more retries.
 - **Durable topology, declared by the consumer on start**: exchanges `payments` and `payments.dlx`, queues `payments.new` (with `x-dead-letter-exchange: payments.dlx` and `x-dead-letter-routing-key: payments.new.dlq`, so a message rejected without requeue lands in the DLQ by the broker itself), `payments.new.retry.{1s,2s}` and `payments.new.dlq`.
 - **Upgrading an existing broker.** RabbitMQ refuses to redeclare a queue with different arguments (`PRECONDITION_FAILED`). Compose's RabbitMQ has no volume, so a fresh `up` is fine; a broker that already holds `payments.new` declared without the dead-letter arguments needs it deleted once (with the consumer stopped, e.g. `rabbitmqctl delete_queue payments.new`), and the consumer re-creates it on start.
 
