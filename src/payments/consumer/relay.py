@@ -79,35 +79,51 @@ class Relay:
     async def publish_batch(self) -> int:
         """Claim one batch, publish it in id order and mark each confirmed event.
 
-        The claim keeps its row locks for the whole batch. When a publish fails
-        or times out, the events confirmed before it are still marked and
-        committed, then the error is raised: the failed event and the ones after
-        it stay unpublished for the next iteration.
+        The claim keeps its row locks for the whole batch. The batch ends early,
+        and the events confirmed so far are still marked and committed, when a
+        publish fails or times out, when the Relay is stopping, or when the task
+        is cancelled. A failure or cancellation is then raised: the failed event
+        and the ones after it stay unpublished for the next iteration.
         """
         failure: BaseException | None = None
         published = 0
-        async with self._session_factory() as session, session.begin():
-            events = (
-                (
-                    await session.execute(
-                        select(OutboxEvent)
-                        .where(OutboxEvent.published_at.is_(None))
-                        .order_by(OutboxEvent.id)
-                        .limit(self._batch_size)
-                        .with_for_update(skip_locked=True)
+        try:
+            async with self._session_factory() as session, session.begin():
+                events = (
+                    (
+                        await session.execute(
+                            select(OutboxEvent)
+                            .where(OutboxEvent.published_at.is_(None))
+                            .order_by(OutboxEvent.id)
+                            .limit(self._batch_size)
+                            .with_for_update(skip_locked=True)
+                        )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            for event in events:
-                try:
-                    await asyncio.wait_for(self._publish(event), self._publish_timeout)
-                except Exception as error:  # commit the confirmed prefix first
-                    failure = error
-                    break
-                event.published_at = datetime.now(UTC)
-                published += 1
+                for event in events:
+                    if self._stopping.is_set():
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            self._publish(event), self._publish_timeout
+                        )
+                    except BaseException as error:  # noqa: BLE001  # commit the prefix, then re-raise
+                        # BaseException so a cancellation (`stop` after STOP_TIMEOUT)
+                        # also commits it. A cancel is delivered once, so the commit
+                        # below can still await; the error is re-raised after it.
+                        failure = error
+                        break
+                    event.published_at = datetime.now(UTC)
+                    published += 1
+        except Exception as commit_error:
+            if failure is not None:
+                logger.error(
+                    "relay publish failed before the commit failed: %r", failure
+                )
+                raise commit_error from failure
+            raise
         if failure is not None:
             raise failure
         return published

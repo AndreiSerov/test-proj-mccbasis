@@ -27,7 +27,7 @@ class PaymentHandler:
         emulator: Emulator,
         http: httpx.AsyncClient,
         webhook_timeout: float,
-        webhook_allowed_hosts: Collection[str] = (),
+        webhook_allowed_hosts: Collection[str],
     ) -> None:
         self._session_factory = session_factory
         self._emulator = emulator

@@ -21,6 +21,7 @@ from payments.consumer.topology import (
     PAYMENTS_NEW_QUEUE,
     declare_retry_topology,
 )
+from payments.consumer.webhook import PinningTransport
 from payments.core.logging import configure_logging, payment_context
 from payments.core.settings import Settings, load_settings
 from payments.db.models import OutboxEvent
@@ -50,7 +51,7 @@ class _Resources:
             pool_size=settings.consumer_concurrency + POOL_MARGIN,
             max_overflow=0,
         )
-        self.http = httpx.AsyncClient()
+        self.http = httpx.AsyncClient(transport=PinningTransport())
         session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         self.handler = PaymentHandler(
             session_factory=session_factory,
