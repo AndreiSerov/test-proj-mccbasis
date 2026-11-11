@@ -25,6 +25,7 @@ flowchart LR
     R -.-> EX
     Handler -.->|"after 3 retries,<br/>or Unprocessable message"| DLX{{"exchange payments.dlx"}}
     DLX --> DLQ["queue payments.new.dlq"]
+    Q -.->|"rejected without requeue<br/>(broker dead-letters)"| DLX
 ```
 
 1. The API writes the Payment (`pending`) and an Outbox event in one transaction.
@@ -216,7 +217,8 @@ Podman notes:
 - **Unprocessable messages** (malformed body, unknown `payment_id`) go straight to the DLQ without retries.
 - **API key scope.** "X-API-Key for all endpoints" is taken literally: only `/health` stays open (container healthchecks). `/docs`, `/redoc` and `/openapi.json` are served behind the key.
 - **Attempts.** "Retry: 3 attempts / DLQ after 3 attempts" is read as 3 Webhook calls in total: the first attempt plus retries after 1 s and 2 s (`RETRY_DELAYS=1,2`), then the DLQ. More delays mean more retries.
-- **Durable topology, declared by the consumer on start**: exchanges `payments` and `payments.dlx`, queues `payments.new`, `payments.new.retry.{1s,2s}` and `payments.new.dlq`.
+- **Durable topology, declared by the consumer on start**: exchanges `payments` and `payments.dlx`, queues `payments.new` (with `x-dead-letter-exchange: payments.dlx` and `x-dead-letter-routing-key: payments.new.dlq`, so a message rejected without requeue lands in the DLQ by the broker itself), `payments.new.retry.{1s,2s}` and `payments.new.dlq`.
+- **Upgrading an existing broker.** RabbitMQ refuses to redeclare a queue with different arguments (`PRECONDITION_FAILED`). Compose's RabbitMQ has no volume, so a fresh `up` is fine; a broker that already holds `payments.new` declared without the dead-letter arguments needs it deleted once (with the consumer stopped, e.g. `rabbitmqctl delete_queue payments.new`), and the consumer re-creates it on start.
 
 ## Guarantees and trade-offs
 
@@ -255,4 +257,5 @@ Note: the management API's message counts lag by a few seconds, so a queue may b
 - A sweeper that re-drives the DLQ, or re-enqueues `pending` Payments older than a threshold.
 - Metrics and tracing (Prometheus, OpenTelemetry), a trace id from the HTTP request through the Outbox event to the Webhook.
 - Per-client API keys and rate limiting; listing and searching Payments.
+- A quorum queue for `payments.new` with `x-delivery-limit`, so a poison message that crashes the whole consumer process is dead-lettered after N redeliveries instead of looping.
 - Push-based Relay wake-up (e.g. `LISTEN/NOTIFY`) to remove the polling latency.

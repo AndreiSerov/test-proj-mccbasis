@@ -77,16 +77,12 @@ async def _mark_all_published(db: AsyncEngine) -> None:
 async def clean_slate(migrated_settings: Settings, db: AsyncEngine) -> None:
     """Start each test with an empty queue and no leftover unpublished events."""
     await _mark_all_published(db)
-    connection = await aio_pika.connect_robust(migrated_settings.rabbitmq_url)
-    async with connection:
-        channel = await connection.channel()
-        queue = await channel.declare_queue("payments.new", durable=True)
-        await queue.purge()
-    for name in [DLQ, *RETRY_QUEUES]:
+    for name in [MAIN_QUEUE, DLQ, *RETRY_QUEUES]:
         await _purge_if_exists(migrated_settings, name)
 
 
 LOCAL = ("127.0.0.1",)
+MAIN_QUEUE = "payments.new"
 DLQ = "payments.new.dlq"
 SHORT_DELAYS = (0.1, 0.2)
 RETRY_QUEUES = [f"payments.new.retry.{d}s" for d in SHORT_DELAYS]
@@ -321,7 +317,7 @@ async def test_unroutable_event_stays_unpublished_until_it_can_be_routed(
     connection = await aio_pika.connect_robust(migrated_settings.rabbitmq_url)
     async with connection:
         channel = await connection.channel()
-        queue = await channel.declare_queue("payments.new", durable=True)
+        queue = await channel.declare_queue(MAIN_QUEUE, passive=True)
         exchange = await channel.get_exchange("payments")
         await queue.unbind(exchange, routing_key="payments.new")
 
@@ -805,3 +801,29 @@ async def test_userinfo_and_query_never_reach_logs_or_x_last_error(
         assert "secret" not in output
         assert "token=x" not in output
     assert "?…" in str(message.headers["x-last-error"])
+
+
+async def test_message_rejected_without_requeue_is_dead_lettered_by_the_broker(
+    migrated_settings: Settings,
+    start_consumer: Callable[..., Awaitable[Any]],
+) -> None:
+    app = await start_consumer()  # declares the topology
+    await app.stop()  # the queue is durable; nothing consumes it now
+    payment_id = str(uuid.uuid4())
+    payload = json.dumps({"payment_id": payment_id}).encode()
+    connection = await aio_pika.connect_robust(migrated_settings.rabbitmq_url)
+    async with connection:
+        channel = await connection.channel()
+        exchange = await channel.get_exchange("payments")
+        await exchange.publish(aio_pika.Message(payload), routing_key=MAIN_QUEUE)
+        queue = await channel.declare_queue(MAIN_QUEUE, passive=True)
+
+        async def delivered() -> aio_pika.abc.AbstractIncomingMessage | None:
+            return await queue.get(fail=False)
+
+        message = await eventually(delivered)
+        await message.reject(requeue=False)
+
+    (dead,) = await dlq_messages(migrated_settings, payment_id)
+    assert dead.body == payload
+    assert dead.headers["x-first-death-queue"] == MAIN_QUEUE

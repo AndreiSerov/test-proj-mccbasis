@@ -50,7 +50,7 @@ The hostnames or IPs in `WEBHOOK_ALLOWED_HOSTS` (exact, case-insensitive match) 
 _Avoid_: Whitelist
 
 **DLQ**:
-The `payments.new.dlq` queue that holds messages still failing after 3 attempts (the first and two retries), and messages that can never be processed (malformed body, unknown Payment), with the last error in a header.
+The `payments.new.dlq` queue that holds messages still failing after 3 attempts (the first and two retries), and messages that can never be processed (malformed body, unknown Payment), with the last error in a header. Messages get in two ways: the consumer republishes them to `payments.dlx` (carrying `x-attempt` and `x-last-error`), or the broker dead-letters one that `payments.new` rejected without requeue (no such headers).
 _Avoid_: Dead queue, error queue
 
 **Webhook**:
