@@ -88,7 +88,7 @@ async def clean_slate(migrated_settings: Settings, db: AsyncEngine) -> None:
 
 LOCAL = ("127.0.0.1",)
 DLQ = "payments.new.dlq"
-SHORT_DELAYS = (0.1, 0.2, 0.4)
+SHORT_DELAYS = (0.1, 0.2)
 RETRY_QUEUES = [f"payments.new.retry.{d}s" for d in SHORT_DELAYS]
 
 
@@ -406,7 +406,7 @@ async def test_webhook_failing_twice_is_retried_and_delivered_on_the_third_call(
     await assert_dlq_empty(migrated_settings)
 
 
-async def test_webhook_always_failing_ends_in_the_dlq_after_four_calls(
+async def test_webhook_always_failing_ends_in_the_dlq_after_three_calls(
     api: httpx.AsyncClient,
     receiver: WebhookReceiver,
     migrated_settings: Settings,
@@ -420,9 +420,9 @@ async def test_webhook_always_failing_ends_in_the_dlq_after_four_calls(
     (message,) = await dlq_messages(migrated_settings, payment_id)
     assert json.loads(message.body)["payment_id"] == payment_id
     assert "500" in str(message.headers["x-last-error"])
-    assert message.headers["x-attempt"] == 4
+    assert message.headers["x-attempt"] == 3
     await asyncio.sleep(0.5)
-    assert len(receiver.for_payment(payment_id)) == 4
+    assert len(receiver.for_payment(payment_id)) == 3
     payment = await get_payment(api, payment_id)
     assert payment["status"] == "succeeded"  # settled once; only the Webhook failed
     assert {c["processed_at"] for c in receiver.for_payment(payment_id)} == {
@@ -501,7 +501,7 @@ async def test_retry_and_dead_letter_topology_is_declared_durable_on_a_fresh_bro
         await channel.declare_exchange(
             "payments.dlx", aio_pika.ExchangeType.DIRECT, durable=True
         )
-        for name, delay_ms in zip(RETRY_QUEUES, (100, 200, 400), strict=True):
+        for name, delay_ms in zip(RETRY_QUEUES, (100, 200), strict=True):
             await channel.declare_queue(
                 name,
                 durable=True,
@@ -545,9 +545,9 @@ async def test_garbage_attempt_header_is_treated_as_the_first_attempt(
         )
 
     (message,) = await dlq_messages(migrated_settings, payment_id)
-    assert message.headers["x-attempt"] == 4
+    assert message.headers["x-attempt"] == 3
     await asyncio.sleep(0.3)
-    assert len(receiver.for_payment(payment_id)) == 4
+    assert len(receiver.for_payment(payment_id)) == 3
 
 
 async def test_refused_republish_is_paused_not_spun_in_a_hot_loop(

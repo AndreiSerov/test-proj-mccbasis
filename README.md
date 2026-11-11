@@ -21,7 +21,7 @@ flowchart LR
     Q --> Handler
     Handler -->|"lock Payment, run Emulator,<br/>commit status"| PG
     Handler -->|"POST Webhook"| Hook([Client webhook_url])
-    Handler -.->|"Delivery failure"| R["payments.new.retry.1s / 2s / 4s<br/>(TTL, dead-letter back)"]
+    Handler -.->|"Delivery failure"| R["payments.new.retry.1s / 2s<br/>(TTL, dead-letter back)"]
     R -.-> EX
     Handler -.->|"after 3 retries,<br/>or Unprocessable message"| DLX{{"exchange payments.dlx"}}
     DLX --> DLQ["queue payments.new.dlq"]
@@ -55,7 +55,7 @@ If image pulls (or the tests) fail with `docker-credential-desktop not installed
 
 | What | Where |
 |---|---|
-| API | http://localhost:8000 (`GET /health` is open; `/docs` has the OpenAPI UI) |
+| API | http://localhost:8000 (`GET /health` is the only open endpoint; `/docs`, `/redoc` and `/openapi.json` need `X-API-Key` too, so use curl or a header-injecting browser extension) |
 | RabbitMQ management UI | http://localhost:15672 (guest / guest) |
 | API key (dev default) | `X-API-Key: dev-api-key` |
 
@@ -110,7 +110,7 @@ curl -i -X POST localhost:8000/api/v1/payments -H "$H" \
 
 ```bash
 curl localhost:8000/api/v1/payments/33c390c8-fdae-4de6-a733-5dbe28f35f97 -H "$H"
-# {"id":"33c390c8-...","amount":"10.50","currency":"USD","description":"Order 42","metadata":{"order_id":42},
+# {"payment_id":"33c390c8-...","amount":"10.50","currency":"USD","description":"Order 42","metadata":{"order_id":42},
 #  "status":"succeeded","webhook_url":"http://webhook-sink:9000/hook","created_at":"...","processed_at":"2026-11-10T10:40:49.592626Z"}
 ```
 
@@ -129,14 +129,13 @@ curl -X POST localhost:8000/api/v1/payments -H "$H" -H 'Idempotency-Key: fail-1'
   -d '{"amount": "5.00", "currency": "EUR", "description": "Always fails", "webhook_url": "http://webhook-sink:9000/hook?fail=1"}'
 ```
 
-After the Emulator finishes, the sink receives the same Webhook four times, about 1 s, 2 s and 4 s apart (the first attempt plus three retries), each answered `500`. The consumer logs each step:
+After the Emulator finishes, the sink receives the same Webhook three times, about 1 s and 2 s apart (the first attempt plus two retries), each answered `500`. The consumer logs each step:
 
 ```bash
 scripts/compose logs consumer | grep -E 'retrying|giving up'
 # ... WARNING ... "delivery failure on attempt 1; retrying via payments.new.retry.1s"
 # ... WARNING ... "delivery failure on attempt 2; retrying via payments.new.retry.2s"
-# ... WARNING ... "delivery failure on attempt 3; retrying via payments.new.retry.4s"
-# ... ERROR   ... "giving up after attempt 4; parking in the DLQ"
+# ... ERROR   ... "giving up after attempt 3; parking in the DLQ"
 ```
 
 The message is now in the DLQ, visible in the management UI (Queues, `payments.new.dlq`) or through its API (counts there lag by a few seconds):
@@ -147,7 +146,7 @@ curl -s -u guest:guest localhost:15672/api/queues/%2F/payments.new.dlq | python3
 
 curl -s -u guest:guest -X POST localhost:15672/api/queues/%2F/payments.new.dlq/get \
   -H 'content-type: application/json' -d '{"count":1,"ackmode":"ack_requeue_true","encoding":"auto"}'
-# [{... "headers":{"x-attempt":4,"x-last-error":"DeliveryFailure: webhook to http://webhook-sink:9000/hook?fail=1 returned 500"},
+# [{... "headers":{"x-attempt":3,"x-last-error":"DeliveryFailure: webhook to http://webhook-sink:9000/hook?fail=1 returned 500"},
 #   "payload":"{\"payment_id\":\"02676879-...\"}", ...}]
 ```
 
@@ -157,12 +156,12 @@ The Payment itself is already `succeeded` (or `failed`): only the Webhook is stu
 
 ## API
 
-All `/api/v1/*` routes need `X-API-Key`; `/health` does not.
+Every endpoint needs `X-API-Key` except `/health`, which stays open for container healthchecks. That includes `/docs`, `/redoc` and `/openapi.json`; Swagger UI fetches `openapi.json` without the header, so a browser cannot open them without an extension that injects it (curl works: `curl localhost:8000/openapi.json -H "$H"`).
 
 | Endpoint | Request | Success | Errors |
 |---|---|---|---|
 | `POST /api/v1/payments` | Headers: `X-API-Key`, `Idempotency-Key` (required, 1-255 chars). Body: `amount` (decimal, > 0, at most 2 places), `currency` (`RUB`, `USD`, `EUR`), `description` (1-255 chars), `metadata` (JSON object, default `{}`), `webhook_url` (HTTP(S) URL, not `localhost` or a literal blocked IP) | `202` `{"payment_id", "status", "created_at"}` | `401` bad or missing key; `409` same key, different body; `422` invalid body, blocked `webhook_url` host or missing `Idempotency-Key` |
-| `GET /api/v1/payments/{payment_id}` | Header: `X-API-Key` | `200` `{"id", "amount", "currency", "description", "metadata", "status", "webhook_url", "created_at", "processed_at"}` | `401`; `404` unknown id; `422` id is not a UUID |
+| `GET /api/v1/payments/{payment_id}` | Header: `X-API-Key` | `200` `{"payment_id", "amount", "currency", "description", "metadata", "status", "webhook_url", "created_at", "processed_at"}` | `401`; `404` unknown id; `422` id is not a UUID |
 | `GET /health` | none | `200` `{"status": "ok"}` | none |
 
 - `amount` is a **string** in every response (`"10.50"`), so no precision is lost. Requests may send it as a string or a number.
@@ -177,11 +176,11 @@ Environment variables, read by the API and the consumer. Compose sets the three 
 |---|---|---|
 | `DATABASE_URL` | required (compose sets it) | SQLAlchemy URL, `postgresql+asyncpg://...` |
 | `RABBITMQ_URL` | required (compose sets it) | `amqp://...` |
-| `API_KEY` | required (compose: `dev-api-key`) | the static `X-API-Key` value |
+| `API_KEY` | required (compose: `dev-api-key`) | the static `X-API-Key` value; must not be empty or whitespace, or start-up fails |
 | `EMULATOR_MIN_DELAY` | `2` | Emulator minimum delay, seconds |
 | `EMULATOR_MAX_DELAY` | `5` | Emulator maximum delay, seconds |
 | `EMULATOR_SUCCESS_RATE` | `0.9` | probability that the Emulator succeeds; the rest are Declines |
-| `RETRY_DELAYS` | `1,2,4` | seconds before each retry; one Retry queue per entry, and the number of entries is the number of retries |
+| `RETRY_DELAYS` | `1,2` | seconds before each retry; one Retry queue per entry, and the number of entries is the number of retries |
 | `WEBHOOK_TIMEOUT` | `5` | seconds before a Webhook call counts as failed |
 | `WEBHOOK_ALLOWED_HOSTS` | empty (compose: `webhook-sink`) | comma-separated hostnames or IPs whose Webhooks skip the Blocked address check |
 | `CONSUMER_CONCURRENCY` | `10` | messages one consumer process handles at once (also the RabbitMQ prefetch); the DB pool is this + 2 |
@@ -215,9 +214,9 @@ Podman notes:
 - **Idempotency key and Request hash.** The key is unique in the database. The Request hash is a SHA-256 of a canonical JSON of the validated body (sorted keys, `10.5` equals `10.50`, canonical URL), so a replay is recognised even if the JSON is written differently. Same key and same hash returns the original Payment; a different hash returns `409`. Concurrent creates race on the unique constraint: the loser re-reads the winner and applies the same rule, so exactly one Payment exists.
 - **An idempotent handler.** The handler locks the Payment with `SELECT ... FOR UPDATE`. If it is already final, it skips the Emulator and only re-sends the Webhook, so a duplicate or retried message never flips the outcome.
 - **Unprocessable messages** (malformed body, unknown `payment_id`) go straight to the DLQ without retries.
-- **API key scope.** `/health` stays open for container healthchecks, and FastAPI's `/docs` and `/openapi.json` stay open for reviewers. Every `/api/v1/*` route requires `X-API-Key`.
-- **Attempts.** "Retry: 3 attempts / DLQ after 3 attempts" is read as the first attempt plus 3 retries at 1 s, 2 s and 4 s, so 4 Webhook calls before the DLQ. `RETRY_DELAYS=1,2` gives 3 calls in total if the stricter reading is wanted.
-- **Durable topology, declared by the consumer on start**: exchanges `payments` and `payments.dlx`, queues `payments.new`, `payments.new.retry.{1s,2s,4s}` and `payments.new.dlq`.
+- **API key scope.** "X-API-Key for all endpoints" is taken literally: only `/health` stays open (container healthchecks). `/docs`, `/redoc` and `/openapi.json` are served behind the key.
+- **Attempts.** "Retry: 3 attempts / DLQ after 3 attempts" is read as 3 Webhook calls in total: the first attempt plus retries after 1 s and 2 s (`RETRY_DELAYS=1,2`), then the DLQ. More delays mean more retries.
+- **Durable topology, declared by the consumer on start**: exchanges `payments` and `payments.dlx`, queues `payments.new`, `payments.new.retry.{1s,2s}` and `payments.new.dlq`.
 
 ## Guarantees and trade-offs
 
@@ -232,7 +231,7 @@ Podman notes:
 
 ## Re-driving the DLQ (manual)
 
-Once the cause is fixed, take exactly one message off the DLQ and publish its body again to the `payments` exchange with routing key `payments.new`. Publish it without the `x-attempt` header, so it starts again at attempt 1 (moving the message as is would keep `x-attempt: 4` and send it straight back to the DLQ). The handler is idempotent: re-driving a message whose Payment is already final only re-sends its Webhook.
+Once the cause is fixed, take exactly one message off the DLQ and publish its body again to the `payments` exchange with routing key `payments.new`. Publish it without the `x-attempt` header, so it starts again at attempt 1 (moving the message as is would keep `x-attempt: 3` and send it straight back to the DLQ). The handler is idempotent: re-driving a message whose Payment is already final only re-sends its Webhook.
 
 ```bash
 # 1. Take one message off the DLQ (acked and removed); note its payload

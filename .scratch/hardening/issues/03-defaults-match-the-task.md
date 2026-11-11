@@ -9,10 +9,20 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] With default settings, a Webhook that always fails is called exactly 3 times, then the message is in `payments.new.dlq` with `x-attempt: 3`
-- [ ] `GET /docs` and `GET /openapi.json` without the key return `401` (or `404` if disabled); `/health` returns `200` without it
-- [ ] Settings with `API_KEY=""` or `"  "` raise at start-up
-- [ ] `GET` returns `payment_id`, not `id`; README examples match
-- [ ] `scripts/check` passes
+- [x] With default settings, a Webhook that always fails is called exactly 3 times, then the message is in `payments.new.dlq` with `x-attempt: 3`
+- [x] `GET /docs` and `GET /openapi.json` without the key return `401` (or `404` if disabled); `/health` returns `200` without it
+- [x] Settings with `API_KEY=""` or `"  "` raise at start-up
+- [x] `GET` returns `payment_id`, not `id`; README examples match
+- [x] `scripts/check` passes
+
+## Comments
+
+2026-11-11:
+- Docs choice: `/docs`, `/redoc`, `/openapi.json` are served behind `X-API-Key` (default docs disabled, protected routes added via `get_swagger_ui_html`, `get_redoc_html`, `get_openapi`). Reason: reviewers can still use them with curl or a header-injecting extension, and the task's "all endpoints" is met literally. Swagger UI in a plain browser cannot fetch `openapi.json` (no header); documented in the README.
+- `Settings.api_key` has a validator rejecting empty or whitespace-only values.
+- `PaymentOut` exposes `payment_id` (read from the model's `id`).
+- Default `RETRY_DELAYS=1,2`; glossary (DLQ, Retry queue), ADR-0002 and README updated (attempts decision, DLQ walkthrough with `x-attempt: 3`, config and API tables, GET example).
+- Tests: new unit tests `tests/unit/test_settings.py` and `tests/unit/test_api_docs.py`. System tests now use `SHORT_DELAYS=(0.1, 0.2)` and expect 3 Webhook calls and `x-attempt: 3`. The default-delay criterion is asserted at the Settings level (default is `(1, 2)`); the system tests inject short delays, so a 1 s + 2 s end-to-end run on defaults was not done.
+- `scripts/check`: ruff, format, pyright clean; 167 passed (system tests ran against Podman containers).

@@ -35,7 +35,7 @@ _Avoid_: Error, failure (for this meaning)
 A technical error while handling a message (webhook non-2xx or timeout, DB error) that triggers a retry.
 
 **Retry queue**:
-One of the TTL queues `payments.new.retry.{1s,2s,4s}` that hold a message for its delay, then dead-letter it back to `payments.new`.
+One of the TTL queues `payments.new.retry.{1s,2s}` (by default; one per entry of `RETRY_DELAYS`) that hold a message for its delay, then dead-letter it back to `payments.new`.
 _Avoid_: Delay queue, backoff queue
 
 **Unprocessable message**:
@@ -50,7 +50,7 @@ The hostnames or IPs in `WEBHOOK_ALLOWED_HOSTS` (exact, case-insensitive match) 
 _Avoid_: Whitelist
 
 **DLQ**:
-The `payments.new.dlq` queue that holds messages still failing after 3 retries, and messages that can never be processed (malformed body, unknown Payment), with the last error in a header.
+The `payments.new.dlq` queue that holds messages still failing after 3 attempts (the first and two retries), and messages that can never be processed (malformed body, unknown Payment), with the last error in a header.
 _Avoid_: Dead queue, error queue
 
 **Webhook**:

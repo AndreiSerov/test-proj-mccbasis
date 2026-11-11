@@ -65,7 +65,8 @@ async def test_create_returns_202_pending_and_get_returns_all_fields(
 
     assert fetched.status_code == 200
     got = fetched.json()
-    assert got["id"] == payment_id
+    assert got["payment_id"] == payment_id
+    assert "id" not in got
     assert got["amount"] == "10.50"
     assert got["currency"] == "USD"
     assert got["description"] == "Order 42"

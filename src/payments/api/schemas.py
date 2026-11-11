@@ -26,7 +26,7 @@ class PaymentAccepted(BaseModel):
 class PaymentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: uuid.UUID
+    payment_id: uuid.UUID = Field(validation_alias="id")
     amount: Decimal
     currency: Currency
     description: str

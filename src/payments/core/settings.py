@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     emulator_max_delay: float = 5
     emulator_success_rate: float = 0.9
 
-    retry_delays: Annotated[tuple[float, ...], NoDecode] = (1, 2, 4)
+    retry_delays: Annotated[tuple[float, ...], NoDecode] = (1, 2)
     webhook_timeout: float = 5
     webhook_allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
     """Hostnames or IPs whose Webhooks skip the Blocked address check."""
@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     relay_poll_interval: float = 0.5
     relay_publish_timeout: float = 5
     """Seconds a publish may wait for the broker's confirm before it fails."""
+
+    @field_validator("api_key")
+    @classmethod
+    def _api_key_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("API_KEY must not be empty or whitespace")
+        return value
 
     @field_validator("retry_delays", mode="before")
     @classmethod
