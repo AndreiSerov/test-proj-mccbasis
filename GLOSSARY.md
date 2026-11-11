@@ -24,15 +24,19 @@ The asyncio task inside the consumer process that publishes unpublished Outbox e
 _Avoid_: Outbox worker, publisher, poller
 
 **Emulator**:
-The stand-in for the external payment gateway: waits 2–5 s and succeeds 90% of the time.
+The stand-in for the external payment gateway: waits 2–5 s and succeeds 90% of the time. Its other 10% is a Decline, or an Emulator error when `EMULATOR_FAILURE_MODE=error`.
 _Avoid_: Gateway, processor
 
 **Decline**:
-An Emulator result of `failed`; a normal business outcome that sets the Payment to `failed` and is never retried.
+An Emulator result of `failed` (the default `EMULATOR_FAILURE_MODE=decline`); a normal business outcome that sets the Payment to `failed` and is never retried.
 _Avoid_: Error, failure (for this meaning)
 
+**Emulator error**:
+The Emulator's non-success outcome when `EMULATOR_FAILURE_MODE=error` (`EmulatorError`): a Delivery failure. Nothing is committed, the Payment stays `pending`, no Webhook is sent, and each retry runs the Emulator again.
+_Avoid_: Decline (for this meaning)
+
 **Delivery failure**:
-A technical error while handling a message (webhook non-2xx or timeout, DB error) that triggers a retry.
+A technical error while handling a message (webhook non-2xx or timeout, DB error, Emulator error) that triggers a retry.
 
 **Retry queue**:
 One of the TTL queues `payments.new.retry.{1s,2s}` (by default; one per entry of `RETRY_DELAYS`) that hold a message for its delay, then dead-letter it back to `payments.new`.

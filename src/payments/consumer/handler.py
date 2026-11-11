@@ -38,9 +38,10 @@ class PaymentHandler:
     async def handle(self, payment_id: uuid.UUID) -> None:
         """Settle the Payment if pending, then send its Webhook.
 
-        Raises DeliveryFailure (or a DB error) when the message should be retried,
-        and Unprocessable when it never can be processed (unknown payment_id,
-        or a Webhook host that resolves to a Blocked address).
+        Raises DeliveryFailure, EmulatorError or a DB error when the message
+        should be retried (an EmulatorError rolls the transaction back and no
+        Webhook is sent), and Unprocessable when it never can be processed
+        (unknown payment_id, or a Webhook host that resolves to a Blocked address).
         """
         payload, url = await self._settle(payment_id)
         await send_webhook(

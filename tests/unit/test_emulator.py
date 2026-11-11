@@ -1,6 +1,9 @@
 import random
+from typing import Literal
 
-from payments.domain.emulator import Emulator
+import pytest
+
+from payments.domain.emulator import Emulator, EmulatorError
 from payments.domain.payment import PaymentStatus
 
 
@@ -12,8 +15,15 @@ class FakeSleep:
         self.delays.append(delay)
 
 
-def make(sleep: FakeSleep, *, success_rate: float = 0.9, seed: int = 1) -> Emulator:
+def make(
+    sleep: FakeSleep,
+    *,
+    success_rate: float = 0.9,
+    seed: int = 1,
+    failure_mode: Literal["decline", "error"] = "decline",
+) -> Emulator:
     return Emulator(
+        failure_mode=failure_mode,
         min_delay=2,
         max_delay=5,
         success_rate=success_rate,
@@ -53,3 +63,13 @@ async def test_rate_extremes_are_deterministic() -> None:
 
     assert {await always.run() for _ in range(100)} == {PaymentStatus.succeeded}
     assert {await never.run() for _ in range(100)} == {PaymentStatus.failed}
+
+
+async def test_error_mode_raises_an_emulator_error_instead_of_declining() -> None:
+    sleep = FakeSleep()
+    never = make(sleep, success_rate=0.0, failure_mode="error")
+    always = make(sleep, success_rate=1.0, failure_mode="error")
+
+    with pytest.raises(EmulatorError):
+        await never.run()
+    assert await always.run() == PaymentStatus.succeeded

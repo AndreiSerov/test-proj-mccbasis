@@ -22,6 +22,8 @@ from payments.api.app import create_app as create_api
 from payments.consumer.app import create_app as create_consumer
 from payments.core.logging import json_handler
 from payments.core.settings import Settings
+from payments.domain.emulator import Emulator, EmulatorError
+from payments.domain.payment import PaymentStatus
 
 AUTH = {"X-API-Key": API_KEY}
 
@@ -234,6 +236,83 @@ async def test_declined_payment_is_failed_and_webhooked_once(
     await assert_dlq_empty(migrated_settings)
     assert calls[0]["processed_at"] is not None
     assert (await get_payment(api, payment_id))["status"] == "failed"
+
+
+class CountingEmulator:
+    """Replaces `Emulator.run`: counts runs and plays a script of outcomes."""
+
+    def __init__(self, outcomes: list[bool] | None) -> None:
+        # True: succeed; False: the Emulator's 10% outcome; None: the real Emulator
+        self.outcomes = outcomes
+        self.runs = 0
+
+
+@pytest.fixture
+def scripted_emulator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., CountingEmulator]:
+    def install(outcomes: list[bool] | None = None) -> CountingEmulator:
+        script = CountingEmulator(outcomes)
+
+        original = Emulator.run
+
+        async def run(self: Emulator) -> PaymentStatus:
+            index = script.runs
+            script.runs += 1
+            if script.outcomes is None:
+                return await original(self)
+            if script.outcomes[min(index, len(script.outcomes) - 1)]:
+                return PaymentStatus.succeeded
+            raise EmulatorError("scripted Emulator error")
+
+        monkeypatch.setattr(Emulator, "run", run)
+        return script
+
+    return install
+
+
+async def test_emulator_error_mode_with_no_success_retries_then_parks_in_the_dlq(
+    migrated_settings: Settings,
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    start_consumer: Callable[..., Awaitable[None]],
+    scripted_emulator: Callable[..., CountingEmulator],
+) -> None:
+    script = scripted_emulator()  # the real Emulator, only counted
+    await start_consumer(emulator_failure_mode="error", emulator_success_rate=0.0)
+
+    payment_id = await create_payment(api, receiver.url)
+
+    (message,) = await dlq_messages(migrated_settings, payment_id)
+    assert "EmulatorError" in str(message.headers["x-last-error"])
+    assert message.headers["x-attempt"] == 3
+    await asyncio.sleep(0.5)  # longer than all retry delays: no 4th run follows
+    assert script.runs == 3
+    assert receiver.for_payment(payment_id) == []
+    payment = await get_payment(api, payment_id)
+    assert payment["status"] == "pending"
+    assert payment["processed_at"] is None
+
+
+async def test_emulator_error_mode_recovers_when_a_retry_succeeds(
+    migrated_settings: Settings,
+    api: httpx.AsyncClient,
+    receiver: WebhookReceiver,
+    start_consumer: Callable[..., Awaitable[None]],
+    scripted_emulator: Callable[..., CountingEmulator],
+) -> None:
+    script = scripted_emulator([False, True])
+    await start_consumer(emulator_failure_mode="error")
+
+    payment_id = await create_payment(api, receiver.url)
+
+    calls = await webhooks_for(receiver, payment_id, 1)
+    await asyncio.sleep(0.5)
+    assert [c["status"] for c in receiver.for_payment(payment_id)] == ["succeeded"]
+    assert script.runs == 2
+    assert (await get_payment(api, payment_id))["status"] == "succeeded"
+    assert calls[0]["processed_at"] is not None
+    await assert_dlq_empty(migrated_settings)
 
 
 async def test_outbox_event_is_marked_published_after_create(

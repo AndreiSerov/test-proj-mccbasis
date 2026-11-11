@@ -10,6 +10,7 @@ x-app: &app
     - EMULATOR_MIN_DELAY
     - EMULATOR_MAX_DELAY
     - EMULATOR_SUCCESS_RATE
+    - EMULATOR_FAILURE_MODE
     - RETRY_DELAYS
     - WEBHOOK_TIMEOUT
     # The demo sink lives on a private address, so it is allowlisted by default.

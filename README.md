@@ -153,6 +153,26 @@ curl -s -u guest:guest -X POST localhost:15672/api/queues/%2F/payments.new.dlq/g
 
 The Payment itself is already `succeeded` (or `failed`): only the Webhook is stuck.
 
+**Emulator error mode.** Read the Emulator's 10% as a technical error instead of a Decline. Restart the consumer so it always errors (`EMULATOR_SUCCESS_RATE=0`) and create a Payment:
+
+```bash
+EMULATOR_FAILURE_MODE=error EMULATOR_SUCCESS_RATE=0 scripts/compose up -d consumer
+curl -X POST localhost:8000/api/v1/payments -H "$H" -H 'Idempotency-Key: emu-error-1' \
+  -H 'Content-Type: application/json' -d "$BODY"
+```
+
+The Emulator runs three times (the first attempt plus retries after 1 s and 2 s, with its 2-5 s wait each time), no Webhook is sent, the Payment stays `pending`, and the message is parked in the DLQ:
+
+```bash
+scripts/compose logs consumer | grep -E 'retrying|giving up'
+# ... WARNING ... "delivery failure on attempt 1; retrying via payments.new.retry.1s"
+# ... WARNING ... "delivery failure on attempt 2; retrying via payments.new.retry.2s"
+# ... ERROR   ... "giving up after attempt 3; parking in the DLQ"
+# the DLQ message's header: "x-last-error":"EmulatorError: the Emulator reported an error"
+```
+
+Restore the default with `scripts/compose up -d consumer` in a shell without those variables.
+
 **Other errors.** No `Idempotency-Key` gives `422`; a missing or wrong `X-API-Key` gives `401`; an unknown payment id gives `404`.
 
 ## API
@@ -180,7 +200,8 @@ Environment variables, read by the API and the consumer. Compose sets the three 
 | `API_KEY` | required (compose: `dev-api-key`) | the static `X-API-Key` value; must not be empty or whitespace, or start-up fails |
 | `EMULATOR_MIN_DELAY` | `2` | Emulator minimum delay, seconds |
 | `EMULATOR_MAX_DELAY` | `5` | Emulator maximum delay, seconds |
-| `EMULATOR_SUCCESS_RATE` | `0.9` | probability that the Emulator succeeds; the rest are Declines |
+| `EMULATOR_SUCCESS_RATE` | `0.9` | probability that the Emulator succeeds; the rest are Declines, or Emulator errors in `error` mode |
+| `EMULATOR_FAILURE_MODE` | `decline` | `decline`: the non-success outcome is a Decline (`failed`, Webhook, no retry). `error`: it is an Emulator error, a Delivery failure (Payment stays `pending`, no Webhook, retries, then the DLQ). Any other value fails at start-up |
 | `RETRY_DELAYS` | `1,2` | seconds before each retry; one Retry queue per entry, and the number of entries is the number of retries |
 | `WEBHOOK_TIMEOUT` | `5` | seconds before a Webhook call counts as failed |
 | `WEBHOOK_ALLOWED_HOSTS` | empty (compose: `webhook-sink`) | comma-separated hostnames or IPs whose Webhooks skip the Blocked address check |

@@ -9,10 +9,14 @@ Add "Emulator error" to `GLOSSARY.md` (and adjust "Decline" and "Delivery failur
 
 **Blocked by:** 03, 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] With `decline`, a 0% success rate gives `failed` Payments, one Webhook each, nothing in the DLQ (existing behaviour, still tested)
-- [ ] With `error` and a 0% success rate, the Payment stays `pending`, no Webhook is sent, the Emulator runs 3 times, and the message is in the DLQ with an Emulator-error `x-last-error`
-- [ ] With `error` and an Emulator that fails once then succeeds, the Payment ends `succeeded` with one Webhook
-- [ ] An unknown value for `EMULATOR_FAILURE_MODE` fails at start-up
-- [ ] `scripts/check` passes
+- [x] With `decline`, a 0% success rate gives `failed` Payments, one Webhook each, nothing in the DLQ (existing behaviour, still tested)
+- [x] With `error` and a 0% success rate, the Payment stays `pending`, no Webhook is sent, the Emulator runs 3 times, and the message is in the DLQ with an Emulator-error `x-last-error`
+- [x] With `error` and an Emulator that fails once then succeeds, the Payment ends `succeeded` with one Webhook
+- [x] An unknown value for `EMULATOR_FAILURE_MODE` fails at start-up
+- [x] `scripts/check` passes
+
+## Comments
+
+2026-11-11: Added `EmulatorError(Exception)` in `domain/emulator.py` (glossary term "Emulator error") and an `Emulator(failure_mode=...)` argument; `Settings.emulator_failure_mode: Literal["decline", "error"]`. The error is not a `DeliveryFailure` subclass (that lives in the consumer layer, the domain must not import it); `FailureRouter` retries every non-`Unprocessable` exception, so it is routed the same way, and the handler's transaction rolls back as the exception leaves `session.begin()`. System tests count or script `Emulator.run` by monkeypatching. Updated GLOSSARY, ADR-0003, README (config table, demo step) and compose forwarding.

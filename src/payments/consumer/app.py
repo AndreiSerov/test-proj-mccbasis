@@ -59,6 +59,7 @@ class _Resources:
                 min_delay=settings.emulator_min_delay,
                 max_delay=settings.emulator_max_delay,
                 success_rate=settings.emulator_success_rate,
+                failure_mode=settings.emulator_failure_mode,
             ),
             http=self.http,
             webhook_timeout=settings.webhook_timeout,
